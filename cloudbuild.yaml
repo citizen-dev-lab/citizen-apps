@@ -1,13 +1,35 @@
+substitutions:
+  _REGION: asia-northeast1
+  _AR_REPO: citizen-dev-lab
+  _APP_NAME: hello
+  _SERVICE: app-hello
+
 steps:
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+  # apps/hello をビルドして push
+  - name: gcr.io/cloud-builders/docker
+    dir: apps/${_APP_NAME}
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA
+      - .
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA
+
+  # WorkflowsでCloud Runへ反映（create/patch）
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: bash
     args:
       - -c
       - |
         set -euo pipefail
+        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA"
         gcloud workflows run citizen-deploy \
-          --location=asia-northeast1 \
-          --data="{\"commit_sha\":\"${COMMIT_SHA}\"}"
+          --location=${_REGION} \
+          --data="{\"region\":\"${_REGION}\",\"serviceName\":\"${_SERVICE}\",\"image\":\"${IMAGE}\"}"
 
 options:
   logging: CLOUD_LOGGING_ONLY
