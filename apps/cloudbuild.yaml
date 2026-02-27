@@ -26,10 +26,9 @@ steps:
       - -c
       - |
         set -euo pipefail
-        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA"
         gcloud workflows run citizen-deploy \
           --location="${_REGION}" \
-          --data="{\"region\":\"${_REGION}\",\"serviceName\":\"${_SERVICE}\",\"image\":\"${IMAGE}\"}"
+          --data="{\"region\":\"${_REGION}\",\"serviceName\":\"${_SERVICE}\",\"image\":\"${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA\"}"
 
 options:
   logging: CLOUD_LOGGING_ONLY
