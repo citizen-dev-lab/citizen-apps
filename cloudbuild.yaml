@@ -5,7 +5,6 @@ substitutions:
   _SERVICE: app-hello
 
 steps:
-  # apps/hello をビルドして push
   - name: gcr.io/cloud-builders/docker
     dir: apps/${_APP_NAME}
     args:
@@ -19,17 +18,15 @@ steps:
       - push
       - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA
 
-  # WorkflowsでCloud Runへ反映（create/patch）
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: bash
     args:
       - -c
       - |
         set -euo pipefail
-        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA"
         gcloud workflows run citizen-deploy \
-          --location=${_REGION} \
-          --data="{\"region\":\"${_REGION}\",\"serviceName\":\"${_SERVICE}\",\"image\":\"${IMAGE}\"}"
+          --location="${_REGION}" \
+          --data="{\"region\":\"${_REGION}\",\"serviceName\":\"${_SERVICE}\",\"image\":\"${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA\"}"
 
 options:
   logging: CLOUD_LOGGING_ONLY
