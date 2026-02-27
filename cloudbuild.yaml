@@ -5,13 +5,10 @@ steps:
       - -c
       - |
         set -euo pipefail
-        echo "Trigger commit: ${COMMIT_SHA}"
-        echo "Repo: ${REPO_NAME}"
-        echo "Branch: ${BRANCH_NAME}"
-
-        gcloud workflows run citizen-deploy \
-          --location=asia-northeast1 \
-          --data="{\"commit_sha\":\"${COMMIT_SHA}\",\"repo\":\"${REPO_NAME}\",\"branch\":\"${BRANCH_NAME}\"}"
+        echo "✅ Cloud Build Trigger Fired!"
+        echo "commit: ${COMMIT_SHA}"
+        echo "repo:   ${REPO_NAME}"
+        echo "branch: ${BRANCH_NAME}"
 
 options:
   logging: CLOUD_LOGGING_ONLY
