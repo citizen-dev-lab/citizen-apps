@@ -1,0 +1,17 @@
+steps:
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        echo "Trigger commit: ${COMMIT_SHA}"
+        echo "Repo: ${REPO_NAME}"
+        echo "Branch: ${BRANCH_NAME}"
+
+        gcloud workflows run citizen-deploy \
+          --location=asia-northeast1 \
+          --data="{\"commit_sha\":\"${COMMIT_SHA}\",\"repo\":\"${REPO_NAME}\",\"branch\":\"${BRANCH_NAME}\"}"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
