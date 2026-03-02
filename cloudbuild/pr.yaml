@@ -70,6 +70,35 @@ steps:
           }"
 
   - name: gcr.io/cloud-builders/gcloud
+    id: set-github-status-success
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        TOKEN="$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")"
+
+        # Cloud Build の組み込み変数（PRのHEADコミットSHAになる想定）
+        SHA="$COMMIT_SHA"
+
+        # Branch rule 側で選べる「status check 名（context）」を作る
+        CONTEXT="pr-preview-deploy (citizen-dev-lab)"
+
+        # ついでに Cloud Build のURLも付ける（なくてもOK）
+        TARGET_URL="https://console.cloud.google.com/cloud-build/builds/$BUILD_ID?project=$PROJECT_ID"
+
+        curl -sS -X POST \
+          -H "Authorization: Bearer $TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          -H "Content-Type: application/json" \
+          "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/statuses/$SHA" \
+          -d "{
+            \"state\":\"success\",
+            \"context\":\"$CONTEXT\",
+            \"description\":\"Cloud Build succeeded\",
+            \"target_url\":\"$TARGET_URL\"
+          }"
+
+  - name: gcr.io/cloud-builders/gcloud
     id: enable-automerge
     entrypoint: bash
     args:
