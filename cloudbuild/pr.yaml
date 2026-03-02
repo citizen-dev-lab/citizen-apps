@@ -49,7 +49,7 @@ PY
         APP="$(echo "$$names" | head -n 1)"
         echo "APP=$$APP" > /workspace/app.env
         echo "Detected APP=$$APP"
-        
+
   - name: gcr.io/cloud-builders/docker
     id: build
     entrypoint: bash
@@ -83,7 +83,7 @@ PY
             \"projectId\":\"$PROJECT_ID\"
           }"
 
-  - name: gcr.io/cloud-builders/curl
+  - name: gcr.io/cloud-builders/gcloud
     id: enable-automerge
     entrypoint: bash
     args:
