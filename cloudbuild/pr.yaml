@@ -46,6 +46,7 @@ steps:
       - -ceu
       - |
         source /workspace/app.env
+        if [ "${skip:-false}" = "true" ]; then echo "Skip build (no app changes)."; exit 0; fi
 
         # project id を確実に取得
         PROJECT="$PROJECT_ID"
