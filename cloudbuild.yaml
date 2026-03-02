@@ -16,7 +16,9 @@ availableSecrets:
       env: GITHUB_TOKEN
 
 steps:
-  # 1) apps/<app>/ を build して Artifact Registry に push
+  # ===============================
+  # 1) Docker build
+  # ===============================
   - name: gcr.io/cloud-builders/docker
     dir: apps/${_APP_NAME}
     args:
@@ -25,13 +27,17 @@ steps:
       - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA
       - .
 
+  # ===============================
+  # 2) Docker push
+  # ===============================
   - name: gcr.io/cloud-builders/docker
     args:
       - push
       - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA
 
-  # 2) Workflows を実行して Cloud Run を更新 → URLを取得
-  # 3) GitHub に「このコミットのデプロイURL」をコメントする
+  # ===============================
+  # 3) Workflows実行 → URL取得 → GitHubコメント
+  # ===============================
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: bash
     secretEnv: ["GITHUB_TOKEN"]
@@ -43,85 +49,61 @@ steps:
         IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA"
         echo "IMAGE=${IMAGE}"
 
-        # Workflows 実行（execution name を取得）
-        EXEC_JSON="$(gcloud workflows run "${_WORKFLOW}" \
+        # ---- Workflows実行（execution nameを取得） ----
+        EXEC_NAME="$(gcloud workflows run "${_WORKFLOW}" \
           --location="${_REGION}" \
           --data="{\"region\":\"${_REGION}\",\"serviceName\":\"${_SERVICE}\",\"image\":\"${IMAGE}\"}" \
-          --format=json)"
-
-        EXEC_NAME="$(python3 - <<'PY'
-import json,sys
-j=json.loads(sys.stdin.read())
-print(j.get("name",""))
-PY
-<<<"${EXEC_JSON}")"
+          --format="value(name)")"
 
         if [ -z "${EXEC_NAME}" ]; then
           echo "ERROR: could not get execution name"
-          echo "${EXEC_JSON}"
           exit 1
         fi
 
         echo "EXEC_NAME=${EXEC_NAME}"
 
-        # 実行完了までポーリング
+        # ---- 実行完了待ち ----
+        RESULT=""
         for i in $(seq 1 60); do
-          DESC_JSON="$(gcloud workflows executions describe "${EXEC_NAME}" --location="${_REGION}" --format=json)"
-          STATE="$(python3 - <<'PY'
-import json,sys
-j=json.loads(sys.stdin.read())
-print(j.get("state",""))
-PY
-<<<"${DESC_JSON}")"
+          STATE="$(gcloud workflows executions describe "${EXEC_NAME}" \
+            --location="${_REGION}" \
+            --format="value(state)")"
 
           if [ "${STATE}" = "SUCCEEDED" ]; then
-            RESULT="$(python3 - <<'PY'
-import json,sys
-j=json.loads(sys.stdin.read())
-print(j.get("result",""))
-PY
-<<<"${DESC_JSON}")"
+            RESULT="$(gcloud workflows executions describe "${EXEC_NAME}" \
+              --location="${_REGION}" \
+              --format="value(result)")"
             break
           fi
 
           if [ "${STATE}" = "FAILED" ] || [ "${STATE}" = "CANCELLED" ]; then
             echo "Workflow execution failed: ${STATE}"
-            echo "${DESC_JSON}"
+            gcloud workflows executions describe "${EXEC_NAME}" \
+              --location="${_REGION}" \
+              --format=json | cat
             exit 1
           fi
 
           sleep 3
         done
 
-        if [ -z "${RESULT:-}" ]; then
-          echo "ERROR: workflow result not found (timeout?)"
-          echo "${DESC_JSON}"
+        if [ -z "${RESULT}" ]; then
+          echo "ERROR: workflow result not found"
           exit 1
         fi
 
-        # RESULT は JSON文字列（例: {"ok":true,"url":"..."}）の想定
-        URL="$(python3 - <<'PY'
-import json,sys
-s=sys.stdin.read()
-try:
-  obj=json.loads(s)
-  print(obj.get("url",""))
-except Exception:
-  print("")
-PY
-<<<"${RESULT}")"
-
+        # ---- URL抽出 ----
+        URL="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get("url",""))' <<<"${RESULT}")"
         echo "URL=${URL}"
 
-        # GitHub commit comment を作成
-        # POST /repos/{owner}/{repo}/commits/{sha}/comments
-        BODY="$(python3 - <<'PY'
+        export URL IMAGE
+
+        # ---- GitHub commit comment 作成 ----
+        BODY="$(python3 - <<PY
 import json,os
 url=os.environ.get("URL","")
-svc=os.environ.get("_SERVICE","")
-region=os.environ.get("_REGION","")
 img=os.environ.get("IMAGE","")
-msg = f"✅ Deploy completed\n\n- service: {svc}\n- region: {region}\n- url: {url}\n- image: {img}\n"
+msg = f"✅ Deploy completed\\n\\n- service: ${_SERVICE}\\n- region: ${_REGION}\\n- url: {url}\\n- image: {img}\\n"
 print(json.dumps({"body": msg}))
 PY
 )"
