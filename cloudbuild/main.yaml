@@ -1,6 +1,5 @@
 options:
   logging: CLOUD_LOGGING_ONLY
-
 substitutions:
   _REGION: asia-northeast1
   _AR_REPO: citizen-dev-lab
@@ -8,9 +7,7 @@ substitutions:
   _GITHUB_TOKEN_SECRET: github-token
   _REPO_OWNER: citizen-dev-lab
   _REPO_NAME: citizen-apps
-
 steps:
-  # 1) 履歴取得 & アプリ検出
   - name: gcr.io/cloud-builders/gcloud
     id: detect-app-main
     entrypoint: bash
@@ -23,8 +20,6 @@ steps:
         COUNT=$$(echo "$$APPS" | grep -v "^[[:space:]]*$$" | wc -l | tr -d " ")
         if [ "$$COUNT" -eq 0 ]; then touch /workspace/SKIP_BUILD; exit 0; fi
         echo "APP=$$APPS" > /workspace/app.env
-
-  # 2) Build & Push
   - name: gcr.io/cloud-builders/docker
     id: build-prod
     entrypoint: bash
@@ -37,8 +32,6 @@ steps:
         docker build -t "$$IMG_NAME" "apps/$$APP"
         docker push "$$IMG_NAME"
         echo "IMG=$$IMG_NAME" >> /workspace/app.env
-
-  # 3) 本番デプロイ
   - name: gcr.io/cloud-builders/gcloud
     id: workflow-prod
     entrypoint: bash
