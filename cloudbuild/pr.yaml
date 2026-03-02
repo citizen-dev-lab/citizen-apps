@@ -8,7 +8,7 @@ substitutions:
   _GITHUB_TOKEN_SECRET: github-token
   _REPO_OWNER: citizen-dev-lab
   _REPO_NAME: citizen-apps
-  _MERGE_METHOD: SQUASH  # MERGE / REBASE も可
+  _MERGE_METHOD: SQUASH
 
 steps:
   - name: gcr.io/cloud-builders/git
@@ -18,15 +18,14 @@ steps:
       - -ceu
       - |
         changed="$(git diff --name-only HEAD~1..HEAD || true)"
-        app_names="$(echo "$changed" | awk -F/ '$1=="apps"{print $2}' | sort -u)"
-        count="$(echo "$app_names" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
+        names="$(echo "$changed" | awk -F/ '$1=="apps"{print $2}' | sort -u)"
+        count="$(echo "$names" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
         if [ "$count" -ne 1 ]; then
-          echo "ERROR: 1 PR = 1 app only. Found: $app_names"
+          echo "ERROR: 1 PR = 1 app only."
           exit 1
         fi
-        APP_NAME="$(echo "$app_names" | head -n 1)"
-        # ★ここがポイント：$APP_NAME は Cloud Build に食われるので $$APP_NAME
-        echo "APP_NAME=$$APP_NAME" | tee /workspace/app.env
+        APP="$(echo "$names" | head -n 1)"
+        echo "APP=$$APP" > /workspace/app.env
 
   - name: gcr.io/cloud-builders/docker
     id: build
@@ -35,13 +34,10 @@ steps:
       - -ceu
       - |
         source /workspace/app.env
-        # $PROJECT_ID / $SHORT_SHA は Cloud Build 組み込みなのでそのまま
-        # bash変数は $$APP_NAME
-        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/$$APP_NAME:$SHORT_SHA"
-        docker build -t "$IMAGE" "apps/$$APP_NAME"
-        docker push "$IMAGE"
-        # ★$IMAGE も Cloud Build に食われるので $$IMAGE
-        echo "IMAGE=$$IMAGE" | tee -a /workspace/app.env
+        IMG="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/$$APP:$SHORT_SHA"
+        docker build -t "$IMG" "apps/$$APP"
+        docker push "$IMG"
+        echo "IMG=$$IMG" >> /workspace/app.env
 
   - name: gcr.io/cloud-builders/gcloud
     id: workflow-preview
@@ -54,8 +50,8 @@ steps:
           --location="${_REGION}" \
           --data="{
             \"mode\":\"preview\",
-            \"appName\":\"$$APP_NAME\",
-            \"image\":\"$$IMAGE\",
+            \"appName\":\"$$APP\",
+            \"image\":\"$$IMG\",
             \"prNumber\":${_PR_NUMBER},
             \"githubTokenSecret\":\"${_GITHUB_TOKEN_SECRET}\",
             \"repoOwner\":\"${_REPO_OWNER}\",
@@ -63,24 +59,3 @@ steps:
             \"region\":\"${_REGION}\",
             \"projectId\":\"$PROJECT_ID\"
           }"
-
-  - name: gcr.io/cloud-builders/curl
-    id: enable-automerge
-    entrypoint: bash
-    args:
-      - -ceu
-      - |
-        TOKEN="$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")"
-
-        # ★GraphQL の $owner なども Cloud Build が置換しようとするので $$owner にする
-        QUERY='query($$owner:String!, $$name:String!, $$number:Int!){repository(owner:$$owner,name:$$name){pullRequest(number:$$number){id}}}'
-        PR_ID="$(curl -sS -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" \
-          -d "{\"query\":\"$$QUERY\",\"variables\":{\"owner\":\"${_REPO_OWNER}\",\"name\":\"${_REPO_NAME}\",\"number\":${_PR_NUMBER}}}" \
-          https://api.github.com/graphql | python -c "import sys,json; print(json.load(sys.stdin)['data']['repository']['pullRequest']['id'])")"
-
-        MUT='mutation($$id:ID!, $$method:PullRequestMergeMethod!){enablePullRequestAutoMerge(input:{pullRequestId:$$id, mergeMethod:$$method}){pullRequest{number}}}'
-        curl -sS -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" \
-          -d "{\"query\":\"$$MUT\",\"variables\":{\"id\":\"$$PR_ID\",\"method\":\"${_MERGE_METHOD}\"}}" \
-          https://api.github.com/graphql >/dev/null
-
-        echo "Auto-merge enabled for PR #${_PR_NUMBER}"
