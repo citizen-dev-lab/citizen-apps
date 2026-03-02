@@ -1,10 +1,22 @@
 substitutions:
   _REGION: asia-northeast1
   _AR_REPO: citizen-dev-lab
-  _APP_NAME: mini
-  _SERVICE: app-mini
+  _APP_NAME: hello
+  _SERVICE: app-hello
+  _WORKFLOW: citizen-deploy
+  _GH_OWNER: citizen-dev-lab
+  _GH_REPO: citizen-apps
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/$PROJECT_ID/secrets/github-token/versions/latest
+      env: GITHUB_TOKEN
 
 steps:
+  # 1) apps/<app>/ を build して Artifact Registry に push
   - name: gcr.io/cloud-builders/docker
     dir: apps/${_APP_NAME}
     args:
@@ -18,20 +30,107 @@ steps:
       - push
       - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA
 
+  # 2) Workflows を実行して Cloud Run を更新 → URLを取得
+  # 3) GitHub に「このコミットのデプロイURL」をコメントする
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: bash
+    secretEnv: ["GITHUB_TOKEN"]
     args:
-      - -c
+      - -ceu
       - |
-        set -euo pipefail
-        gcloud workflows run citizen-deploy \
+        set -o pipefail
+
+        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA"
+        echo "IMAGE=${IMAGE}"
+
+        # Workflows 実行（execution name を取得）
+        EXEC_JSON="$(gcloud workflows run "${_WORKFLOW}" \
           --location="${_REGION}" \
-          --data="{\"region\":\"${_REGION}\",\"serviceName\":\"${_SERVICE}\",\"image\":\"${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA\"}"
+          --data="{\"region\":\"${_REGION}\",\"serviceName\":\"${_SERVICE}\",\"image\":\"${IMAGE}\"}" \
+          --format=json)"
 
-options:
-  logging: CLOUD_LOGGING_ONLY
+        EXEC_NAME="$(python3 - <<'PY'
+import json,sys
+j=json.loads(sys.stdin.read())
+print(j.get("name",""))
+PY
+<<<"${EXEC_JSON}")"
 
-availableSecrets:
-  secretManager:
-    - versionName: projects/$PROJECT_ID/secrets/github-token/versions/latest
-      env: GITHUB_TOKEN
+        if [ -z "${EXEC_NAME}" ]; then
+          echo "ERROR: could not get execution name"
+          echo "${EXEC_JSON}"
+          exit 1
+        fi
+
+        echo "EXEC_NAME=${EXEC_NAME}"
+
+        # 実行完了までポーリング
+        for i in $(seq 1 60); do
+          DESC_JSON="$(gcloud workflows executions describe "${EXEC_NAME}" --location="${_REGION}" --format=json)"
+          STATE="$(python3 - <<'PY'
+import json,sys
+j=json.loads(sys.stdin.read())
+print(j.get("state",""))
+PY
+<<<"${DESC_JSON}")"
+
+          if [ "${STATE}" = "SUCCEEDED" ]; then
+            RESULT="$(python3 - <<'PY'
+import json,sys
+j=json.loads(sys.stdin.read())
+print(j.get("result",""))
+PY
+<<<"${DESC_JSON}")"
+            break
+          fi
+
+          if [ "${STATE}" = "FAILED" ] || [ "${STATE}" = "CANCELLED" ]; then
+            echo "Workflow execution failed: ${STATE}"
+            echo "${DESC_JSON}"
+            exit 1
+          fi
+
+          sleep 3
+        done
+
+        if [ -z "${RESULT:-}" ]; then
+          echo "ERROR: workflow result not found (timeout?)"
+          echo "${DESC_JSON}"
+          exit 1
+        fi
+
+        # RESULT は JSON文字列（例: {"ok":true,"url":"..."}）の想定
+        URL="$(python3 - <<'PY'
+import json,sys
+s=sys.stdin.read()
+try:
+  obj=json.loads(s)
+  print(obj.get("url",""))
+except Exception:
+  print("")
+PY
+<<<"${RESULT}")"
+
+        echo "URL=${URL}"
+
+        # GitHub commit comment を作成
+        # POST /repos/{owner}/{repo}/commits/{sha}/comments
+        BODY="$(python3 - <<'PY'
+import json,os
+url=os.environ.get("URL","")
+svc=os.environ.get("_SERVICE","")
+region=os.environ.get("_REGION","")
+img=os.environ.get("IMAGE","")
+msg = f"✅ Deploy completed\n\n- service: {svc}\n- region: {region}\n- url: {url}\n- image: {img}\n"
+print(json.dumps({"body": msg}))
+PY
+)"
+
+        curl -sS -X POST \
+          -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${_GH_OWNER}/${_GH_REPO}/commits/${COMMIT_SHA}/comments" \
+          -d "${BODY}" | cat
+
+        echo "Posted deploy URL to commit comment."
