@@ -47,9 +47,7 @@ steps:
         set -o pipefail
 
         IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA"
-        echo "IMAGE=${IMAGE}"
 
-        # ---- Workflows実行（execution nameを取得） ----
         EXEC_NAME="$(gcloud workflows run "${_WORKFLOW}" \
           --location="${_REGION}" \
           --data="{\"region\":\"${_REGION}\",\"serviceName\":\"${_SERVICE}\",\"image\":\"${IMAGE}\"}" \
@@ -60,9 +58,6 @@ steps:
           exit 1
         fi
 
-        echo "EXEC_NAME=${EXEC_NAME}"
-
-        # ---- 実行完了待ち ----
         RESULT=""
         for i in $(seq 1 60); do
           STATE="$(gcloud workflows executions describe "${EXEC_NAME}" \
@@ -77,42 +72,22 @@ steps:
           fi
 
           if [ "${STATE}" = "FAILED" ] || [ "${STATE}" = "CANCELLED" ]; then
-            echo "Workflow execution failed: ${STATE}"
-            gcloud workflows executions describe "${EXEC_NAME}" \
-              --location="${_REGION}" \
-              --format=json | cat
+            echo "Workflow execution failed"
             exit 1
           fi
 
           sleep 3
         done
 
-        if [ -z "${RESULT}" ]; then
-          echo "ERROR: workflow result not found"
-          exit 1
-        fi
+        URL="$(echo "${RESULT}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("url",""))')"
 
-        # ---- URL抽出 ----
-        URL="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get("url",""))' <<<"${RESULT}")"
-        echo "URL=${URL}"
-
-        export URL IMAGE
-
-        # ---- GitHub commit comment 作成 ----
-        BODY="$(python3 - <<PY
-import json,os
-url=os.environ.get("URL","")
-img=os.environ.get("IMAGE","")
-msg = f"✅ Deploy completed\\n\\n- service: ${_SERVICE}\\n- region: ${_REGION}\\n- url: {url}\\n- image: {img}\\n"
-print(json.dumps({"body": msg}))
-PY
-)"
+        BODY="{\"body\": \"✅ Deploy completed\\n\\n- service: ${_SERVICE}\\n- region: ${_REGION}\\n- url: ${URL}\\n- image: ${IMAGE}\"}"
 
         curl -sS -X POST \
           -H "Authorization: Bearer ${GITHUB_TOKEN}" \
           -H "X-GitHub-Api-Version: 2022-11-28" \
           -H "Accept: application/vnd.github+json" \
           "https://api.github.com/repos/${_GH_OWNER}/${_GH_REPO}/commits/${COMMIT_SHA}/comments" \
-          -d "${BODY}" | cat
+          -d "${BODY}"
 
         echo "Posted deploy URL to commit comment."
