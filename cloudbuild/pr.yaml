@@ -10,9 +10,11 @@ substitutions:
   _REPO_NAME: citizen-apps
   _MERGE_METHOD: SQUASH
   _STATUS_CONTEXT: cloudbuild/pr-preview-deploy
+  # トリガーから渡されない場合のためのデフォルト値
+  _PR_NUMBER: ""
 
 steps:
-  # 1) PRの変更ファイル一覧をGitHub APIから取得して、apps/<app>/ を1つだけ検出
+  # 1) PRの変更ファイル一覧を取得（Pythonのエラー対策済み）
   - name: gcr.io/cloud-builders/gcloud
     id: detect-app
     entrypoint: bash
@@ -26,19 +28,31 @@ steps:
           -H "Accept: application/vnd.github+json" \
           "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/pulls/${_PR_NUMBER}/files?per_page=100")"
 
-        names="$(echo "$$files_json" | python3 -c 'import sys,json,re; data=json.load(sys.stdin); apps=set(); [apps.add(m.group(1)) for f in data if (m:=re.match(r"apps/([^/]+)/", f.get("filename","")) )]; print("\n".join(sorted(apps)))')"
+        # Python側でAPIエラーを検知できるよう修正
+        echo "$$files_json" | python3 -c '
+        import sys, json, re
+        data = json.load(sys.stdin)
+        if not isinstance(data, list):
+            print(f"ERROR: GitHub API returned error: {data}", file=sys.stderr)
+            sys.exit(1)
+        apps = set()
+        for f in data:
+            m = re.match(r"apps/([^/]+)/", f.get("filename", ""))
+            if m: apps.add(m.group(1))
+        print("\n".join(sorted(apps)))
+        ' > /workspace/apps.txt
 
-        count="$(echo "$$names" | sed "/^[[:space:]]*$$/d" | wc -l | tr -d " ")"
+        count="$(grep -v "^[[:space:]]*$$" /workspace/apps.txt | wc -l | tr -d " ")"
         if [ "$$count" -ne 1 ]; then
-          echo "ERROR: 1 PR = 1 app only. Found: $$names"
+          echo "ERROR: 1 PR = 1 app only. Found: $$(cat /workspace/apps.txt)"
           exit 1
         fi
 
-        APP="$(echo "$$names" | head -n 1)"
+        APP="$$(cat /workspace/apps.txt | head -n 1)"
         echo "APP=$$APP" > /workspace/app.env
         echo "Detected APP=$$APP"
 
-  # 2) Docker build & push（PROJECT_ID unbound 対策済み）
+  # 2) Docker build & push
   - name: gcr.io/cloud-builders/docker
     id: build
     entrypoint: bash
@@ -46,26 +60,17 @@ steps:
       - -ceu
       - |
         source /workspace/app.env
-
-        # project id を確実に取得
-        PROJECT="$PROJECT_ID"
-        if [ -z "$$PROJECT" ]; then
-          PROJECT="$(gcloud config get-value project 2>/dev/null || true)"
-        fi
-        if [ -z "$$PROJECT" ]; then
-          echo "ERROR: PROJECT_ID is empty"
-          exit 1
-        fi
-
-        # commit sha を直接取得（SHORT_SHAを使わない）
-        SHA="$(git rev-parse --short HEAD)"
-
+        PROJECT="$$PROJECT_ID"
+        if [ -z "$$PROJECT" ]; then PROJECT="$$(gcloud config get-value project)"; fi
+        
+        SHA="$$(git rev-parse --short HEAD)"
         IMG="${_REGION}-docker.pkg.dev/$$PROJECT/${_AR_REPO}/$$APP:$$SHA"
+        
         docker build -t "$$IMG" "apps/$$APP"
         docker push "$$IMG"
         echo "IMG=$$IMG" >> /workspace/app.env
 
-  # 3) Workflows preview 実行（PROJECT_IDを確実に渡す）
+  # 3) Workflows 実行
   - name: gcr.io/cloud-builders/gcloud
     id: workflow-preview
     entrypoint: bash
@@ -73,15 +78,8 @@ steps:
       - -ceu
       - |
         source /workspace/app.env
-
-        PROJECT="$PROJECT_ID"
-        if [ -z "$$PROJECT" ]; then
-          PROJECT="$(gcloud config get-value project 2>/dev/null || true)"
-        fi
-        if [ -z "$$PROJECT" ]; then
-          echo "ERROR: PROJECT_ID is empty"
-          exit 1
-        fi
+        PROJECT="$$PROJECT_ID"
+        if [ -z "$$PROJECT" ]; then PROJECT="$$(gcloud config get-value project)"; fi
 
         gcloud workflows run "${_WORKFLOW}" \
           --location="${_REGION}" \
@@ -97,58 +95,5 @@ steps:
             \"projectId\":\"$$PROJECT\"
           }"
 
-  # 4) GitHubへ「Commit status」を報告（Branch rulesの Add checks に出すため）
-  - name: gcr.io/cloud-builders/gcloud
-    id: report-status-success
-    entrypoint: bash
-    args:
-      - -ceu
-      - |
-        TOKEN="$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")"
-
-        # 環境により SHA 変数名が違うのでフォールバック
-        SHA="${COMMIT_SHA:-${REVISION_ID:-}}"
-        if [ -z "$$SHA" ]; then
-          # 最後の手段：gitから取得
-          SHA="$(git rev-parse HEAD 2>/dev/null || true)"
-        fi
-        if [ -z "$$SHA" ]; then
-          echo "ERROR: could not determine commit SHA"
-          exit 1
-        fi
-
-        payload="$(python3 -c 'import json,os; print(json.dumps({
-          "state":"success",
-          "context":os.environ.get("_STATUS_CONTEXT","cloudbuild/pr-preview-deploy"),
-          "description":"Cloud Build succeeded"
-        }))')"
-
-        curl -sS -X POST \
-          -H "Authorization: Bearer $$TOKEN" \
-          -H "Accept: application/vnd.github+json" \
-          -H "Content-Type: application/json" \
-          "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/statuses/$$SHA" \
-          -d "$$payload" >/dev/null
-
-        echo "Reported GitHub status: ${_STATUS_CONTEXT} = success for $$SHA"
-
-  # 5) PRのAuto-mergeをAPIでONにする（GitHub側でAllow auto-mergeがONにできるようになってから効く）
-  - name: gcr.io/cloud-builders/gcloud
-    id: enable-automerge
-    entrypoint: bash
-    args:
-      - -ceu
-      - |
-        TOKEN="$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")"
-
-        QUERY='query($$owner:String!, $$name:String!, $$number:Int!){repository(owner:$$owner,name:$$name){pullRequest(number:$$number){id}}}'
-        PR_ID="$(curl -sS -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" \
-          -d "{\"query\":\"$$QUERY\",\"variables\":{\"owner\":\"${_REPO_OWNER}\",\"name\":\"${_REPO_NAME}\",\"number\":${_PR_NUMBER}}}" \
-          https://api.github.com/graphql | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['repository']['pullRequest']['id'])")"
-
-        MUT='mutation($$id:ID!, $$method:PullRequestMergeMethod!){enablePullRequestAutoMerge(input:{pullRequestId:$$id, mergeMethod:$$method}){pullRequest{number}}}'
-        curl -sS -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" \
-          -d "{\"query\":\"$$MUT\",\"variables\":{\"id\":\"$$PR_ID\",\"method\":\"${_MERGE_METHOD}\"}}" \
-          https://api.github.com/graphql >/dev/null
-
-        echo "Auto-merge enabled for PR #${_PR_NUMBER}"
+  # 4) GitHub Commit Status 報告 & 自動マージのトリガー
+  # (ここに、前回 404 エラーになった GitHub API への POST 処理などを入れる)
