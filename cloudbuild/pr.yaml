@@ -1,5 +1,6 @@
 options:
   logging: CLOUD_LOGGING_ONLY
+  substitutionOption: ALLOW_LOOSE
 
 substitutions:
   _REGION: asia-northeast1
@@ -12,7 +13,7 @@ substitutions:
   _STATUS_CONTEXT: cloudbuild/pr-preview-deploy
 
 steps:
-  # 1) PRの変更ファイル一覧をGitHub APIから取得して、apps/<app>/ を1つだけ検出
+  # 1) PRの変更ファイル一覧をGitHub APIから取得して apps/<app>/ を検出
   - name: gcr.io/cloud-builders/gcloud
     id: detect-app
     entrypoint: bash
@@ -26,19 +27,44 @@ steps:
           -H "Accept: application/vnd.github+json" \
           "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/pulls/${_PR_NUMBER}/files?per_page=100")"
 
-        names="$(echo "$$files_json" | python3 -c 'import sys,json,re; data=json.load(sys.stdin); apps=set(); [apps.add(m.group(1)) for f in data if (m:=re.match(r"apps/([^/]+)/", f.get("filename","")) )]; print("\n".join(sorted(apps)))')"
+        # filename から apps/<app>/ を抽出（安定する multi-line python）
+        names="$(printf '%s' "$$files_json" | python3 - <<'PY'
+import sys, json, re
+data = json.load(sys.stdin)
+apps = set()
+for f in data:
+    fn = f.get("filename", "")
+    m = re.match(r"apps/([^/]+)/", fn)
+    if m:
+        apps.add(m.group(1))
+print("\n".join(sorted(apps)))
+PY
+)"
 
-        count="$(echo "$$names" | sed "/^[[:space:]]*$$/d" | wc -l | tr -d " ")"
+        # 空行を除去して正確にカウント
+        count="$(printf '%s\n' "$$names" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
+
+        # ★重要：アプリ変更がないPRはスキップ成功
+        if [ "$$count" -eq 0 ]; then
+          echo "No app changes detected. Skip pr-preview-deploy."
+          printf "skip=true\n" | tee /workspace/app.env
+          exit 0
+        fi
+
+        # アプリ変更が複数はエラー
         if [ "$$count" -ne 1 ]; then
           echo "ERROR: 1 PR = 1 app only. Found: $$names"
           exit 1
         fi
 
-        APP="$(echo "$$names" | head -n 1)"
-        echo "APP=$$APP" > /workspace/app.env
+        APP="$(printf '%s\n' "$$names" | head -n 1)"
+        {
+          echo "skip=false"
+          echo "APP=$$APP"
+        } | tee /workspace/app.env
         echo "Detected APP=$$APP"
 
-  # 2) Docker build & push（PROJECT_ID unbound 対策済み）
+  # 2) Docker build & push
   - name: gcr.io/cloud-builders/docker
     id: build
     entrypoint: bash
@@ -46,6 +72,10 @@ steps:
       - -ceu
       - |
         source /workspace/app.env
+        if [ "${skip:-false}" = "true" ]; then
+          echo "Skip build (no app changes)."
+          exit 0
+        fi
 
         # project id を確実に取得
         PROJECT="$PROJECT_ID"
@@ -57,15 +87,19 @@ steps:
           exit 1
         fi
 
-        # commit sha を直接取得（SHORT_SHAを使わない）
-        SHA="$(git rev-parse --short HEAD)"
+        # commit sha を直接取得（SHORT_SHA を使わない）
+        SHA="$(git rev-parse --short HEAD 2>/dev/null || true)"
+        if [ -z "$$SHA" ]; then
+          echo "ERROR: could not determine short SHA"
+          exit 1
+        fi
 
         IMG="${_REGION}-docker.pkg.dev/$$PROJECT/${_AR_REPO}/$$APP:$$SHA"
         docker build -t "$$IMG" "apps/$$APP"
         docker push "$$IMG"
         echo "IMG=$$IMG" >> /workspace/app.env
 
-  # 3) Workflows preview 実行（PROJECT_IDを確実に渡す）
+  # 3) Workflows preview 実行
   - name: gcr.io/cloud-builders/gcloud
     id: workflow-preview
     entrypoint: bash
@@ -73,6 +107,10 @@ steps:
       - -ceu
       - |
         source /workspace/app.env
+        if [ "${skip:-false}" = "true" ]; then
+          echo "Skip workflow preview (no app changes)."
+          exit 0
+        fi
 
         PROJECT="$PROJECT_ID"
         if [ -z "$$PROJECT" ]; then
@@ -97,7 +135,7 @@ steps:
             \"projectId\":\"$$PROJECT\"
           }"
 
-  # 4) GitHubへ「Commit status」を報告（Branch rulesの Add checks に出すため）
+  # 4) GitHubへ「Commit status」を報告（必須チェックのため）
   - name: gcr.io/cloud-builders/gcloud
     id: report-status-success
     entrypoint: bash
@@ -106,10 +144,8 @@ steps:
       - |
         TOKEN="$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")"
 
-        # 環境により SHA 変数名が違うのでフォールバック
         SHA="${COMMIT_SHA:-${REVISION_ID:-}}"
         if [ -z "$$SHA" ]; then
-          # 最後の手段：gitから取得
           SHA="$(git rev-parse HEAD 2>/dev/null || true)"
         fi
         if [ -z "$$SHA" ]; then
@@ -117,11 +153,15 @@ steps:
           exit 1
         fi
 
-        payload="$(python3 -c 'import json,os; print(json.dumps({
-          "state":"success",
-          "context":os.environ.get("_STATUS_CONTEXT","cloudbuild/pr-preview-deploy"),
-          "description":"Cloud Build succeeded"
-        }))')"
+        payload="$(python3 - <<'PY'
+import json, os
+print(json.dumps({
+  "state": "success",
+  "context": os.environ.get("_STATUS_CONTEXT", "cloudbuild/pr-preview-deploy"),
+  "description": "Cloud Build succeeded"
+}))
+PY
+)"
 
         curl -sS -X POST \
           -H "Authorization: Bearer $$TOKEN" \
@@ -132,13 +172,22 @@ steps:
 
         echo "Reported GitHub status: ${_STATUS_CONTEXT} = success for $$SHA"
 
-  # 5) PRのAuto-mergeをAPIでONにする（GitHub側でAllow auto-mergeがONにできるようになってから効く）
+  # 5) PRのAuto-mergeをAPIでONにする
   - name: gcr.io/cloud-builders/gcloud
     id: enable-automerge
     entrypoint: bash
     args:
       - -ceu
       - |
+        # skip=true のときは auto-merge も不要（設定変更PRなど）
+        if [ -f /workspace/app.env ]; then
+          source /workspace/app.env
+          if [ "${skip:-false}" = "true" ]; then
+            echo "Skip enable-automerge (no app changes)."
+            exit 0
+          fi
+        fi
+
         TOKEN="$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")"
 
         QUERY='query($$owner:String!, $$name:String!, $$number:Int!){repository(owner:$$owner,name:$$name){pullRequest(number:$$number){id}}}'
