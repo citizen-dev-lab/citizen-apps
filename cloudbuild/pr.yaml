@@ -35,8 +35,8 @@ steps:
       - |
         source /workspace/app.env
         IMG="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/$$APP:$SHORT_SHA"
-        docker build -t "$IMG" "apps/$$APP"
-        docker push "$IMG"
+        docker build -t "$$IMG" "apps/$$APP"
+        docker push "$$IMG"
         echo "IMG=$$IMG" >> /workspace/app.env
 
   - name: gcr.io/cloud-builders/gcloud
