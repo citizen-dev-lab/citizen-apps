@@ -1,0 +1,73 @@
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  _REGION: asia-northeast1
+  _AR_REPO: citizen-dev-lab
+  _WORKFLOW: citizen-deploy
+  _GITHUB_TOKEN_SECRET: github-token
+  _REPO_OWNER: citizen-dev-lab
+  _REPO_NAME: citizen-apps
+
+steps:
+  - name: gcr.io/cloud-builders/git
+    id: detect-app-and-pr
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        # 1) APP_NAME（直近差分から）
+        changed="$(git diff --name-only HEAD~1..HEAD || true)"
+        app_names="$(echo "$changed" | awk -F/ '$1=="apps"{print $2}' | sort -u)"
+        count="$(echo "$app_names" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
+        if [ "$count" -ne 1 ]; then
+          echo "ERROR: main deploy expects exactly 1 app change. Found: $app_names"
+          exit 1
+        fi
+        APP_NAME="$(echo "$app_names" | head -n 1)"
+
+        # 2) PR番号（merge commit messageから抽出）
+        msg="$(git log -1 --pretty=%B)"
+        pr="$(echo "$msg" | sed -n 's/.*#\([0-9][0-9]*\).*/\1/p' | head -n 1 || true)"
+        if [ -z "$pr" ]; then
+          echo "ERROR: Could not detect PR number from merge commit message."
+          echo "Commit message was:"
+          echo "$msg"
+          exit 1
+        fi
+
+        echo "APP_NAME=$APP_NAME" | tee /workspace/app.env
+        echo "PR_NUMBER=$pr" | tee -a /workspace/app.env
+
+  - name: gcr.io/cloud-builders/docker
+    id: build
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        source /workspace/app.env
+        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${APP_NAME}:$SHORT_SHA"
+        docker build -t "$IMAGE" "apps/${APP_NAME}"
+        docker push "$IMAGE"
+        echo "IMAGE=$IMAGE" | tee -a /workspace/app.env
+
+  - name: gcr.io/cloud-builders/gcloud
+    id: workflow-prod
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        source /workspace/app.env
+        gcloud workflows run "${_WORKFLOW}" \
+          --location="${_REGION}" \
+          --data="{
+            \"mode\":\"prod\",
+            \"appName\":\"${APP_NAME}\",
+            \"image\":\"${IMAGE}\",
+            \"prNumber\":${PR_NUMBER},
+            \"githubTokenSecret\":\"${_GITHUB_TOKEN_SECRET}\",
+            \"repoOwner\":\"${_REPO_OWNER}\",
+            \"repoName\":\"${_REPO_NAME}\",
+            \"region\":\"${_REGION}\",
+            \"projectId\":\"$PROJECT_ID\"
+          }"
