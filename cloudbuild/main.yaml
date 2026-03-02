@@ -28,10 +28,11 @@ steps:
       - |
         if [ -f /workspace/SKIP_BUILD ]; then exit 0; fi
         source /workspace/app.env
-        IMG_NAME="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/$$APP:${SHORT_SHA}"
-        docker build -t "$$IMG_NAME" "apps/$$APP"
-        docker push "$$IMG_NAME"
-        echo "IMG=$$IMG_NAME" >> /workspace/app.env
+        BASE_IMG="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/$$APP"
+        docker build -t "$${BASE_IMG}:${SHORT_SHA}" -t "$${BASE_IMG}:latest" "apps/$$APP"
+        docker push "$${BASE_IMG}:${SHORT_SHA}"
+        docker push "$${BASE_IMG}:latest"
+        echo "IMG=$${BASE_IMG}:${SHORT_SHA}" >> /workspace/app.env
   - name: gcr.io/cloud-builders/gcloud
     id: workflow-prod
     entrypoint: bash
