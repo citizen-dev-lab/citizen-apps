@@ -17,15 +17,24 @@ steps:
     args:
       - -ceu
       - |
-        changed="$(git diff --name-only HEAD~1..HEAD || true)"
+        # PRでは shallow checkout で HEAD~1 が無いことがあるため、
+        # main を fetch して main...HEAD の差分で判定する
+        git fetch --depth=50 origin main
+
+        changed="$(git diff --name-only origin/main...HEAD || true)"
         names="$(echo "$changed" | awk -F/ '$1=="apps"{print $2}' | sort -u)"
         count="$(echo "$names" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
+
         if [ "$count" -ne 1 ]; then
           echo "ERROR: 1 PR = 1 app only. Found: $names"
+          echo "Changed files:"
+          echo "$changed"
           exit 1
         fi
+
         APP="$(echo "$names" | head -n 1)"
         echo "APP=$$APP" > /workspace/app.env
+        echo "Detected APP=$$APP"
 
   - name: gcr.io/cloud-builders/docker
     id: build
