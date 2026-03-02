@@ -21,7 +21,7 @@ steps:
         names="$(echo "$changed" | awk -F/ '$1=="apps"{print $2}' | sort -u)"
         count="$(echo "$names" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
         if [ "$count" -ne 1 ]; then
-          echo "ERROR: 1 PR = 1 app only."
+          echo "ERROR: 1 PR = 1 app only. Found: $names"
           exit 1
         fi
         APP="$(echo "$names" | head -n 1)"
@@ -59,3 +59,24 @@ steps:
             \"region\":\"${_REGION}\",
             \"projectId\":\"$PROJECT_ID\"
           }"
+
+  - name: gcr.io/cloud-builders/curl
+    id: enable-automerge
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        TOKEN="$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")"
+
+        # GraphQL内の $owner/$name/$number も置換されるので $$ にする
+        QUERY='query($$owner:String!, $$name:String!, $$number:Int!){repository(owner:$$owner,name:$$name){pullRequest(number:$$number){id}}}'
+        PR_ID="$(curl -sS -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" \
+          -d "{\"query\":\"$$QUERY\",\"variables\":{\"owner\":\"${_REPO_OWNER}\",\"name\":\"${_REPO_NAME}\",\"number\":${_PR_NUMBER}}}" \
+          https://api.github.com/graphql | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['repository']['pullRequest']['id'])")"
+
+        MUT='mutation($$id:ID!, $$method:PullRequestMergeMethod!){enablePullRequestAutoMerge(input:{pullRequestId:$$id, mergeMethod:$$method}){pullRequest{number}}}'
+        curl -sS -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" \
+          -d "{\"query\":\"$$MUT\",\"variables\":{\"id\":\"$$PR_ID\",\"method\":\"${_MERGE_METHOD}\"}}" \
+          https://api.github.com/graphql >/dev/null
+
+        echo "Auto-merge enabled for PR #${_PR_NUMBER}"
