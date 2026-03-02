@@ -10,39 +10,21 @@ substitutions:
   _REPO_NAME: citizen-apps
 
 steps:
-  # 1) 履歴を取得して変更アプリを検出（IDを"detect-app-main"に変更）
+  # 1) 履歴取得 & アプリ検出
   - name: gcr.io/cloud-builders/gcloud
     id: detect-app-main
     entrypoint: bash
     args:
       - -ceu
       - |
-        # 履歴が1つしかない場合に、強制的に過去の履歴を取りに行く
         git fetch --unshallow || git fetch --depth=2
-
-        # 変更されたファイルの一覧を取得
         FILES=$$(git diff --name-only HEAD^ HEAD)
-        echo "Changed files: $$FILES"
-
-        # apps/<app>/ 以下のディレクトリ名を抽出
         APPS=$$(echo "$$FILES" | grep '^apps/' | cut -d/ -f2 | sort -u || true)
-        
         COUNT=$$(echo "$$APPS" | grep -v "^[[:space:]]*$$" | wc -l | tr -d " ")
-
-        # アプリの変更がない場合はスキップ（これがないとYAML修正でエラーになる）
-        if [ "$$COUNT" -eq 0 ]; then
-          echo "No app changes detected. Skipping production deploy."
-          touch /workspace/SKIP_BUILD
-          exit 0
-        elif [ "$$COUNT" -gt 1 ]; then
-          echo "ERROR: Multiple apps changed. Production deploy supports 1 app at a time."
-          exit 1
-        fi
-
+        if [ "$$COUNT" -eq 0 ]; then touch /workspace/SKIP_BUILD; exit 0; fi
         echo "APP=$$APPS" > /workspace/app.env
-        echo "Detected APP=$$APPS"
 
-  # 2) Docker build & push
+  # 2) Build & Push
   - name: gcr.io/cloud-builders/docker
     id: build-prod
     entrypoint: bash
@@ -51,16 +33,12 @@ steps:
       - |
         if [ -f /workspace/SKIP_BUILD ]; then exit 0; fi
         source /workspace/app.env
-        
-        CUR_PROJECT=$$(gcloud config get-value project)
-        CUR_SHA=$$(git rev-parse --short HEAD)
-        IMG_NAME="${_REGION}-docker.pkg.dev/$$CUR_PROJECT/${_AR_REPO}/$$APP:$$CUR_SHA"
-        
+        IMG_NAME="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/$$APP:${SHORT_SHA}"
         docker build -t "$$IMG_NAME" "apps/$$APP"
         docker push "$$IMG_NAME"
         echo "IMG=$$IMG_NAME" >> /workspace/app.env
 
-  # 3) Workflows 実行（本番環境デプロイ）
+  # 3) 本番デプロイ
   - name: gcr.io/cloud-builders/gcloud
     id: workflow-prod
     entrypoint: bash
@@ -69,17 +47,5 @@ steps:
       - |
         if [ -f /workspace/SKIP_BUILD ]; then exit 0; fi
         source /workspace/app.env
-        CUR_PROJECT=$$(gcloud config get-value project)
-
-        gcloud workflows run "${_WORKFLOW}" \
-          --location="${_REGION}" \
-          --data="{
-            \"mode\":\"prod\",
-            \"appName\":\"$$APP\",
-            \"image\":\"$$IMG\",
-            \"githubTokenSecret\":\"${_GITHUB_TOKEN_SECRET}\",
-            \"repoOwner\":\"${_REPO_OWNER}\",
-            \"repoName\":\"${_REPO_NAME}\",
-            \"region\":\"${_REGION}\",
-            \"projectId\":\"$$CUR_PROJECT\"
-          }"
+        gcloud workflows run "${_WORKFLOW}" --location="${_REGION}" \
+          --data="{\"mode\":\"prod\",\"appName\":\"$$APP\",\"image\":\"$$IMG\",\"githubTokenSecret\":\"${_GITHUB_TOKEN_SECRET}\",\"repoOwner\":\"${_REPO_OWNER}\",\"repoName\":\"${_REPO_NAME}\",\"region\":\"${_REGION}\",\"projectId\":\"${PROJECT_ID}\"}"
