@@ -34,12 +34,10 @@ steps:
       - -ceu
       - |
         source /workspace/app.env
-        # $PROJECT_ID と $SHORT_SHA は Cloud Build 組み込み置換なのでそのままでOK
-        # $APP_NAME は bash 変数なので $$APP_NAME にする
-        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/$$APP_NAME:$SHORT_SHA"
-        docker build -t "$IMAGE" "apps/$$APP_NAME"
-        docker push "$IMAGE"
-        echo "IMAGE=$IMAGE" | tee -a /workspace/app.env
+        IMG="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/$$APP:$SHORT_SHA"
+        docker build -t "$IMG" "apps/$$APP"
+        docker push "$IMG"
+        echo "IMG=$$IMG" >> /workspace/app.env
 
   - name: gcr.io/cloud-builders/gcloud
     id: workflow-preview
@@ -52,8 +50,8 @@ steps:
           --location="${_REGION}" \
           --data="{
             \"mode\":\"preview\",
-            \"appName\":\"$$APP_NAME\",
-            \"image\":\"$$IMAGE\",
+            \"appName\":\"$$APP\",
+            \"image\":\"$$IMG\",
             \"prNumber\":${_PR_NUMBER},
             \"githubTokenSecret\":\"${_GITHUB_TOKEN_SECRET}\",
             \"repoOwner\":\"${_REPO_OWNER}\",
@@ -62,7 +60,6 @@ steps:
             \"projectId\":\"$PROJECT_ID\"
           }"
 
-  # 4) Auto-merge を ON（GraphQL）
   - name: gcr.io/cloud-builders/curl
     id: enable-automerge
     entrypoint: bash
@@ -71,13 +68,13 @@ steps:
       - |
         TOKEN="$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")"
 
-        # PR node id を取得 → enablePullRequestAutoMerge
-        QUERY='query($owner:String!, $name:String!, $number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){id}}}'
+        # GraphQL内の $owner/$name/$number 等が Cloud Build に置換されないよう $$ にする
+        QUERY='query($$owner:String!, $$name:String!, $$number:Int!){repository(owner:$$owner,name:$$name){pullRequest(number:$$number){id}}}'
         PR_ID="$(curl -sS -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" \
           -d "{\"query\":\"$$QUERY\",\"variables\":{\"owner\":\"${_REPO_OWNER}\",\"name\":\"${_REPO_NAME}\",\"number\":${_PR_NUMBER}}}" \
-          https://api.github.com/graphql | python -c "import sys,json; print(json.load(sys.stdin)['data']['repository']['pullRequest']['id'])")"
+          https://api.github.com/graphql | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['repository']['pullRequest']['id'])")"
 
-        MUT='mutation($id:ID!, $method:PullRequestMergeMethod!){enablePullRequestAutoMerge(input:{pullRequestId:$id, mergeMethod:$method}){pullRequest{number}}}'
+        MUT='mutation($$id:ID!, $$method:PullRequestMergeMethod!){enablePullRequestAutoMerge(input:{pullRequestId:$$id, mergeMethod:$$method}){pullRequest{number}}}'
         curl -sS -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" \
           -d "{\"query\":\"$$MUT\",\"variables\":{\"id\":\"$$PR_ID\",\"method\":\"${_MERGE_METHOD}\"}}" \
           https://api.github.com/graphql >/dev/null
