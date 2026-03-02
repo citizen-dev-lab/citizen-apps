@@ -16,7 +16,6 @@ availableSecrets:
       env: GITHUB_TOKEN
 
 steps:
-  # 1) Docker build
   - name: gcr.io/cloud-builders/docker
     dir: apps/${_APP_NAME}
     args:
@@ -25,13 +24,11 @@ steps:
       - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA
       - .
 
-  # 2) Docker push
   - name: gcr.io/cloud-builders/docker
     args:
       - push
       - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA
 
-  # 3) Workflows実行 → URL取得 → GitHub commit comment
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: bash
     secretEnv: ["GITHUB_TOKEN"]
@@ -43,15 +40,16 @@ steps:
         IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA"
         echo "IMAGE=$$IMAGE"
 
-        EXEC_NAME="$(gcloud workflows run "${_WORKFLOW}" \
+        EXEC_NAME="$$(gcloud workflows run "${_WORKFLOW}" \
           --location="${_REGION}" \
-          --data="{\"region\":\"${_REGION}\",\"serviceName\":\"${_SERVICE}\",\"image\":\"$${IMAGE}\"}" \
+          --data="{\"region\":\"${_REGION}\",\"serviceName\":\"${_SERVICE}\",\"image\":\"$$IMAGE\"}" \
           --format="value(name)")"
 
         if [ -z "$$EXEC_NAME" ]; then
           echo "ERROR: could not get execution name"
           exit 1
         fi
+        echo "EXEC_NAME=$$EXEC_NAME"
 
         RESULT=""
         for i in $$(seq 1 60); do
@@ -67,7 +65,7 @@ steps:
           fi
 
           if [ "$$STATE" = "FAILED" ] || [ "$$STATE" = "CANCELLED" ]; then
-            echo "Workflow execution failed: $$STATE"
+            echo "Workflow failed: $$STATE"
             gcloud workflows executions describe "$$EXEC_NAME" --location="${_REGION}" --format=json | cat
             exit 1
           fi
@@ -83,17 +81,12 @@ steps:
         URL="$$(echo "$$RESULT" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("url",""))')"
         echo "URL=$$URL"
 
-        # コメント本文（改行を含む）を python で JSON に安全に変換
-        PAYLOAD="$$(python3 - <<'PY'
-import json, os
-service = os.environ.get("_SERVICE","")
-region  = os.environ.get("_REGION","")
-url     = os.environ.get("URL","")
-image   = os.environ.get("IMAGE","")
-body = "✅ Deploy completed\\n\\n- service: {}\\n- region: {}\\n- url: {}\\n- image: {}\\n".format(service, region, url, image)
-print(json.dumps({"body": body}))
-PY
-        )"
+        # JSON payload を “1行Python” で生成（YAML破壊しない）
+        PAYLOAD="$$(python3 -c 'import json,sys; import os; 
+service=os.environ.get("_SERVICE",""); region=os.environ.get("_REGION",""); 
+url=os.environ.get("URL",""); image=os.environ.get("IMAGE",""); 
+body=f"✅ Deploy completed\\n\\n- service: {service}\\n- region: {region}\\n- url: {url}\\n- image: {image}\\n"; 
+print(json.dumps({"body": body}))')"
 
         curl -sS -X POST \
           -H "Authorization: Bearer $$GITHUB_TOKEN" \
