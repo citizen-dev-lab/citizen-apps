@@ -47,7 +47,7 @@ steps:
       - |
         source /workspace/app.env
 
-        # Cloud Buildの置換変数 $PROJECT_ID を bash 変数に取り込む（-u対策）
+        # project id を確実に取得
         PROJECT="$PROJECT_ID"
         if [ -z "$$PROJECT" ]; then
           PROJECT="$(gcloud config get-value project 2>/dev/null || true)"
@@ -57,7 +57,10 @@ steps:
           exit 1
         fi
 
-        IMG="${_REGION}-docker.pkg.dev/$$PROJECT/${_AR_REPO}/$$APP:$$SHORT_SHA"
+        # commit sha を直接取得（SHORT_SHAを使わない）
+        SHA="$(git rev-parse --short HEAD)"
+
+        IMG="${_REGION}-docker.pkg.dev/$$PROJECT/${_AR_REPO}/$$APP:$$SHA"
         docker build -t "$$IMG" "apps/$$APP"
         docker push "$$IMG"
         echo "IMG=$$IMG" >> /workspace/app.env
