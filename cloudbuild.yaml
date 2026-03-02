@@ -16,9 +16,7 @@ availableSecrets:
       env: GITHUB_TOKEN
 
 steps:
-  # ===============================
   # 1) Docker build
-  # ===============================
   - name: gcr.io/cloud-builders/docker
     dir: apps/${_APP_NAME}
     args:
@@ -27,67 +25,66 @@ steps:
       - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA
       - .
 
-  # ===============================
   # 2) Docker push
-  # ===============================
   - name: gcr.io/cloud-builders/docker
     args:
       - push
       - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA
 
-  # ===============================
-  # 3) Workflows実行 → URL取得 → GitHubコメント
-  # ===============================
+  # 3) Workflow → URL取得 → GitHubコメント
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: bash
     secretEnv: ["GITHUB_TOKEN"]
     args:
-      - -ceu
+      - -c
       - |
-        set -o pipefail
+        set -euo pipefail
 
         IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA"
 
-        EXEC_NAME="$(gcloud workflows run "${_WORKFLOW}" \
+        EXEC_NAME=$(gcloud workflows run "${_WORKFLOW}" \
           --location="${_REGION}" \
-          --data="{\"region\":\"${_REGION}\",\"serviceName\":\"${_SERVICE}\",\"image\":\"$IMAGE\"}" \
-          --format="value(name)")"
+          --data="{\"region\":\"${_REGION}\",\"serviceName\":\"${_SERVICE}\",\"image\":\"${IMAGE}\"}" \
+          --format="value(name)")
 
-        if [ -z "${EXEC_NAME}" ]; then
-          echo "ERROR: could not get execution name"
+        if [ -z "$EXEC_NAME" ]; then
+          echo "Failed to start workflow"
           exit 1
         fi
 
-        RESULT=""
         for i in $(seq 1 60); do
-          STATE="$(gcloud workflows executions describe "${EXEC_NAME}" \
+          STATE=$(gcloud workflows executions describe "$EXEC_NAME" \
             --location="${_REGION}" \
-            --format="value(state)")"
+            --format="value(state)")
 
-          if [ "${STATE}" = "SUCCEEDED" ]; then
-            RESULT="$(gcloud workflows executions describe "${EXEC_NAME}" \
+          if [ "$STATE" = "SUCCEEDED" ]; then
+            RESULT=$(gcloud workflows executions describe "$EXEC_NAME" \
               --location="${_REGION}" \
-              --format="value(result)")"
+              --format="value(result)")
             break
           fi
 
-          if [ "${STATE}" = "FAILED" ] || [ "${STATE}" = "CANCELLED" ]; then
-            echo "Workflow execution failed"
+          if [ "$STATE" = "FAILED" ] || [ "$STATE" = "CANCELLED" ]; then
+            echo "Workflow failed"
             exit 1
           fi
 
           sleep 3
         done
 
-        URL="$(echo "${RESULT}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("url",""))')"
+        URL=$(echo "$RESULT" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("url",""))')
 
-        BODY="{\"body\": \"✅ Deploy completed\\n\\n- service: ${_SERVICE}\\n- region: ${_REGION}\\n- url: ${URL}\\n- image: $IMAGE\"}"
+        COMMENT="✅ Deploy completed
 
-        curl -sS -X POST \
-          -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
+- service: ${_SERVICE}
+- region: ${_REGION}
+- url: ${URL}
+- image: ${IMAGE}"
+
+        curl -s -X POST \
+          -H "Authorization: Bearer $GITHUB_TOKEN" \
           -H "Accept: application/vnd.github+json" \
-          "https://api.github.com/repos/${_GH_OWNER}/${_GH_REPO}/commits/${COMMIT_SHA}/comments" \
-          -d "${BODY}"
+          "https://api.github.com/repos/${_GH_OWNER}/${_GH_REPO}/commits/$COMMIT_SHA/comments" \
+          -d "{\"body\":\"$COMMENT\"}"
 
-        echo "Posted deploy URL to commit comment."
+        echo "Posted deploy URL."
