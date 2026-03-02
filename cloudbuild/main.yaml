@@ -17,7 +17,20 @@ steps:
     args:
       - -ceu
       - |
-        changed="$(git diff --name-only HEAD~1..HEAD || true)"
+        # --- ensure git history exists (Cloud Build may shallow-clone) ---
+        git config --global --add safe.directory /workspace || true
+
+        # If shallow, unshallow; otherwise fetch a bit of history (safe either way)
+        if [ "$(git rev-parse --is-shallow-repository 2>/dev/null || echo false)" = "true" ]; then
+          git fetch --unshallow origin || git fetch --depth=50 origin
+        else
+          git fetch --depth=50 origin || true
+        fi
+
+        # Use first-parent diff (stable for merge commits/squash commits)
+        base="$(git rev-parse HEAD^1)"
+        changed="$(git diff --name-only "${base}..HEAD" || true)"
+
         app_names="$(echo "$changed" | awk -F/ '$1=="apps"{print $2}' | sort -u)"
         count="$(echo "$app_names" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
         if [ "$count" -ne 1 ]; then
@@ -29,15 +42,18 @@ steps:
         msg="$(git log -1 --pretty=%B)"
         pr_number="$(echo "$msg" | sed -n 's/.*#\([0-9][0-9]*\).*/\1/p' | head -n 1 || true)"
         if [ -z "$pr_number" ]; then
-          echo "ERROR: Could not detect PR number from merge commit message."
+          echo "ERROR: Could not detect PR number from commit message."
           echo "Commit message was:"
           echo "$msg"
           exit 1
         fi
 
+        short_sha="$(git rev-parse --short HEAD)"
+
         {
           echo "app_name=$app_name"
           echo "pr_number=$pr_number"
+          echo "short_sha=$short_sha"
         } | tee /workspace/app.env
 
   - name: gcr.io/cloud-builders/docker
@@ -47,7 +63,7 @@ steps:
       - -ceu
       - |
         source /workspace/app.env
-        image="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${app_name}:$SHORT_SHA"
+        image="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${app_name}:${short_sha}"
         docker build -t "$image" "apps/${app_name}"
         docker push "$image"
         echo "image=$image" | tee -a /workspace/app.env
