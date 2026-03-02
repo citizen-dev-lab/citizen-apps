@@ -47,9 +47,52 @@
 # 🔁 PR policy
 1. **PRリンクの提示**: Push後、PR作成URL（`https://github.com/<owner>/<repo>/pull/new/<branch>`）を出力する
 2. **手順案内**: 市民に対し「PRを作成して、内容に問題がなければマージしてください」と案内する
-3. **デプロイの待ち合わせ**: 
+3. **デプロイの待ち合わせ**:
    - 「マージ後、Cloud Buildが自動でプレビュー環境を作成します」
    - 「**URLはPRのコメント欄に自動で投稿される**ので、そちらを確認してください」と案内する
+
+---
+
+# 🚀 完了プロトコル（実装完了時の自動実行）
+
+実装が完了したら、Claudeは**ユーザーへの確認なしに**以下を自動実行する：
+
+### Step 1: コミット & Push
+```bash
+git add apps/<appName>/
+git commit -m "feat: <appName>アプリを追加（または変更内容の要約）"
+git push -u origin <branch-name>
+```
+
+### Step 2: PR自動作成（curl で GitHub API を直接叩く）
+環境変数 `GITHUB_TOKEN` を使い、curl で PR を作成する。
+`gh` コマンドは使わない（環境によって利用できないため）。
+
+```bash
+curl -s -X POST \
+  -H "Authorization: token ${GITHUB_TOKEN}" \
+  -H "Accept: application/vnd.github+json" \
+  -d '{
+    "title": "<appName>: 変更内容の要約",
+    "head": "<branch-name>",
+    "base": "main",
+    "body": "## 変更内容\n- ..."
+  }' \
+  "https://api.github.com/repos/citizen-dev-lab/citizen-apps/pulls"
+```
+
+- **成功時**: レスポンスの `html_url` を PR リンクとしてユーザーに提示する
+- **GITHUB_TOKEN 未設定の場合**: PR作成用URLを出力してフォールバックする
+  ```
+  https://github.com/citizen-dev-lab/citizen-apps/pull/new/<branch>
+  ```
+
+> **注意**: トークンは環境変数としてのみ保持する。CLAUDE.md やソースコードにトークンを直接書き込んではならない。
+
+### Step 3: ユーザーへの案内
+- PRのURLを提示する
+- 「内容に問題がなければマージしてください」と案内する
+- 「マージ後、自動でデプロイが始まります。URLはPRのコメント欄に届きます」と伝える
 
 ---
 
@@ -65,5 +108,5 @@
 1. 変更内容の要約
 2. 変更ファイル一覧
 3. 作業ブランチ名
-4. **PR作成用URL**（リンク形式）
-5. 「マージ後、自動でデプロイが始まります。URLがコメントされるまでお待ちください」というメッセージ
+4. **PRのURL**（curl で自動作成したPRリンク、または GITHUB_TOKEN 未設定時はPR作成用URL）
+5. 「内容に問題がなければマージしてください。マージ後、自動でデプロイが始まります。URLはPRのコメント欄に届きます」というメッセージ
