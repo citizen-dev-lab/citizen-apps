@@ -54,7 +54,7 @@ steps:
         gcloud workflows run "${_WORKFLOW}" --location="${_REGION}" \
           --data="{\"mode\":\"preview\",\"appName\":\"$$APP\",\"image\":\"$$IMG\",\"prNumber\":${_PR_NUMBER},\"githubTokenSecret\":\"${_GITHUB_TOKEN_SECRET}\",\"repoOwner\":\"${_REPO_OWNER}\",\"repoName\":\"${_REPO_NAME}\",\"region\":\"${_REGION}\",\"projectId\":\"${PROJECT_ID}\"}"
 
-  # 4) 後処理（URL検索と通知）
+  # 4) 後処理（粘り強くURLを探して通知）
   - name: gcr.io/cloud-builders/gcloud
     id: finalize
     entrypoint: bash
@@ -66,24 +66,35 @@ steps:
 
         if [ ! -f /workspace/SKIP_BUILD ]; then
           source /workspace/app.env
-          echo "Finding the URL for PR ${_PR_NUMBER}..."
-          sleep 25
           
-          # 【賢い検索】名前の中に PR番号 と アプリ名 の両方が入っているサービスを探す
-          RUN_URL=$$(gcloud run services list --platform managed --region "${_REGION}" \
-            --filter="metadata.name ~ ${_PR_NUMBER} AND metadata.name ~ $$APP" \
-            --format='value(status.url)' | head -n 1)
+          # 【改良】URLが見つかるまで最大18回（3分間）ループして探し続ける
+          FINAL_URL=""
+          echo "Searching for the preview URL for PR #${_PR_NUMBER}..."
+          
+          for i in {1..18}; do
+            echo "Attempt $$i: Looking for Cloud Run service..."
+            # PR番号とアプリ名を含むサービスを検索
+            FOUND_URL=$$(gcloud run services list --platform managed --region "${_REGION}" \
+              --filter="metadata.name ~ ${_PR_NUMBER} AND metadata.name ~ $$APP" \
+              --format='value(status.url)' | head -n 1)
+            
+            if [ -n "$$FOUND_URL" ]; then
+              FINAL_URL="$$FOUND_URL"
+              echo "URL found: $$FINAL_URL"
+              break
+            fi
+            sleep 10
+          done
 
-          # もし見つからなければ、通常の名前で試す
-          if [ -z "$$RUN_URL" ]; then
-            RUN_URL=$$(gcloud run services describe "$$APP" --platform managed --region "${_REGION}" --format='value(status.url)' 2>/dev/null || echo "デプロイ完了。数分後にURLが有効になります。")
+          if [ -z "$$FINAL_URL" ]; then
+            FINAL_URL="デプロイに時間がかかっています。Cloud Runコンソールで確認してください。"
           fi
 
-          MSG="🚀 **プレビュー環境のデプロイが完了しました！**\n\n**URL:** $$RUN_URL"
+          MSG="🚀 **プレビュー環境のデプロイが完了しました！**\n\n**URL:** $$FINAL_URL"
           PAYLOAD=$$(python3 -c "import json; print(json.dumps({'body': \"$${MSG}\"}))")
           curl -sS -X POST -H "Authorization: Bearer $$FIN_TOKEN" "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/issues/${_PR_NUMBER}/comments" -d "$$PAYLOAD"
           
-          # Auto-merge予約（最後に行う）
+          # Auto-merge予約（最後に実行）
           QUERY='query($$o:String!,$$r:String!,$$n:Int!){repository(owner:$$o,name:$$r){pullRequest(number:$$n){id}}}'
           PR_ID=$$(curl -sS -H "Authorization: Bearer $$FIN_TOKEN" -d "{\"query\":\"$$QUERY\",\"variables\":{\"o\":\"${_REPO_OWNER}\",\"r\":\"${_REPO_NAME}\",\"n\":${_PR_NUMBER}}}" https://api.github.com/graphql | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['repository']['pullRequest']['id'])")
           MUTATION='mutation($$id:ID!,$$m:PullRequestMergeMethod!){enablePullRequestAutoMerge(input:{pullRequestId:$$id,mergeMethod:$$m}){pullRequest{number}}}'
