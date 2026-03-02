@@ -1,6 +1,5 @@
 options:
   logging: CLOUD_LOGGING_ONLY
-  substitutionOption: ALLOW_LOOSE
 
 substitutions:
   _REGION: asia-northeast1
@@ -11,64 +10,74 @@ substitutions:
   _REPO_NAME: citizen-apps
 
 steps:
+  # 1) 履歴を取得して変更アプリを検出（Skip機能付き）
   - name: gcr.io/cloud-builders/git
-    id: detect-app-and-pr
+    id: detect-app-prod
     entrypoint: bash
     args:
       - -ceu
       - |
-        changed="$(git diff --name-only HEAD~1..HEAD || true)"
-        app_names="$(echo "$changed" | awk -F/ '$1=="apps"{print $2}' | sort -u)"
-        count="$(echo "$app_names" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
-        if [ "$count" -ne 1 ]; then
-          echo "ERROR: main deploy expects exactly 1 app change. Found: $app_names"
+        # 履歴を2つ分取得（HEAD~1 を見えるようにする）
+        git fetch --unshallow || git fetch --depth=2
+
+        # 変更ファイルを取得
+        FILES=$$(git diff --name-only HEAD^ HEAD)
+        
+        # apps/<app>/ 以下のディレクトリ名を抽出
+        APPS=$$(echo "$$FILES" | grep '^apps/' | cut -d/ -f2 | sort -u || true)
+        
+        COUNT=$$(echo "$$APPS" | grep -v "^[[:space:]]*$$" | wc -l | tr -d " ")
+
+        if [ "$$COUNT" -eq 0 ]; then
+          echo "No app changes detected. Skipping production deploy."
+          touch /workspace/SKIP_BUILD
+          exit 0
+        elif [ "$$COUNT" -gt 1 ]; then
+          echo "ERROR: Multiple apps changed. Production deploy supports 1 app at a time."
           exit 1
         fi
-        app_name="$(echo "$app_names" | head -n 1)"
 
-        msg="$(git log -1 --pretty=%B)"
-        pr_number="$(echo "$msg" | sed -n 's/.*#\([0-9][0-9]*\).*/\1/p' | head -n 1 || true)"
-        if [ -z "$pr_number" ]; then
-          echo "ERROR: Could not detect PR number from merge commit message."
-          echo "Commit message was:"
-          echo "$msg"
-          exit 1
-        fi
+        echo "APP=$$APPS" > /workspace/app.env
+        echo "Detected APP=$$APPS"
 
-        {
-          echo "app_name=$app_name"
-          echo "pr_number=$pr_number"
-        } | tee /workspace/app.env
-
+  # 2) Docker build & push
   - name: gcr.io/cloud-builders/docker
-    id: build
+    id: build-prod
     entrypoint: bash
     args:
       - -ceu
       - |
+        if [ -f /workspace/SKIP_BUILD ]; then exit 0; fi
         source /workspace/app.env
-        image="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${app_name}:$SHORT_SHA"
-        docker build -t "$image" "apps/${app_name}"
-        docker push "$image"
-        echo "image=$image" | tee -a /workspace/app.env
+        
+        CUR_PROJECT=$$(gcloud config get-value project)
+        CUR_SHA=$$(git rev-parse --short HEAD)
+        IMG_NAME="${_REGION}-docker.pkg.dev/$$CUR_PROJECT/${_AR_REPO}/$$APP:$$CUR_SHA"
+        
+        docker build -t "$$IMG_NAME" "apps/$$APP"
+        docker push "$$IMG_NAME"
+        echo "IMG=$$IMG_NAME" >> /workspace/app.env
 
+  # 3) Workflows 実行（本番環境デプロイ）
   - name: gcr.io/cloud-builders/gcloud
     id: workflow-prod
     entrypoint: bash
     args:
       - -ceu
       - |
+        if [ -f /workspace/SKIP_BUILD ]; then exit 0; fi
         source /workspace/app.env
+        CUR_PROJECT=$$(gcloud config get-value project)
+
         gcloud workflows run "${_WORKFLOW}" \
           --location="${_REGION}" \
           --data="{
             \"mode\":\"prod\",
-            \"appName\":\"${app_name}\",
-            \"image\":\"${image}\",
-            \"prNumber\":${pr_number},
+            \"appName\":\"$$APP\",
+            \"image\":\"$$IMG\",
             \"githubTokenSecret\":\"${_GITHUB_TOKEN_SECRET}\",
             \"repoOwner\":\"${_REPO_OWNER}\",
             \"repoName\":\"${_REPO_NAME}\",
             \"region\":\"${_REGION}\",
-            \"projectId\":\"$PROJECT_ID\"
+            \"projectId\":\"$$CUR_PROJECT\"
           }"
