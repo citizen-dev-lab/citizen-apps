@@ -24,17 +24,7 @@ steps:
           -H "Accept: application/vnd.github+json" \
           "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/pulls/${_PR_NUMBER}/files?per_page=100")"
 
-        names="$(echo "$$files_json" | python3 - <<'PY'
-import sys, json, re
-data = json.load(sys.stdin)
-apps = set()
-for f in data:
-    m = re.match(r"apps/([^/]+)/", f.get("filename", ""))
-    if m:
-        apps.add(m.group(1))
-print("\n".join(sorted(apps)))
-PY
-)"
+        names="$(echo "$$files_json" | python3 -c 'import sys,json,re; data=json.load(sys.stdin); apps=set(); [apps.add(re.match(r"apps/([^/]+)/", f.get("filename","")).group(1)) for f in data if re.match(r"apps/([^/]+)/", f.get("filename",""))]; print("\n".join(sorted(apps)))')"
 
         count="$(echo "$$names" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
         if [ "$$count" -ne 1 ]; then
