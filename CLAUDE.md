@@ -17,3 +17,10 @@
 ## Deployment Model
 - main へのマージがデプロイトリガー
 - デプロイはGCP側で行う
+
+## Release / Deploy rules
+- PR作成は必須ではない（環境により不可能な場合がある）
+- 変更は原則1コミット
+- 「公開してURLを出しますか？」にユーザーが「はい」と答えたら main に直接pushしてよい
+- mainへのpushが公開トリガー（Cloud Build → Workflows → Cloud Run）
+- 
