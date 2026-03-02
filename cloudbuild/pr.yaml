@@ -13,7 +13,7 @@ substitutions:
   _PR_NUMBER: ""
 
 steps:
-  # 1) アプリ検出
+  # 1) アプリ検出（Skip機能付き）
   - name: gcr.io/cloud-builders/gcloud
     id: detect-app
     entrypoint: bash
@@ -54,7 +54,7 @@ steps:
         gcloud workflows run "${_WORKFLOW}" --location="${_REGION}" \
           --data="{\"mode\":\"preview\",\"appName\":\"$$APP\",\"image\":\"$$IMG\",\"prNumber\":${_PR_NUMBER},\"githubTokenSecret\":\"${_GITHUB_TOKEN_SECRET}\",\"repoOwner\":\"${_REPO_OWNER}\",\"repoName\":\"${_REPO_NAME}\",\"region\":\"${_REGION}\",\"projectId\":\"${PROJECT_ID}\"}"
 
-  # 4) 後処理（粘り強くURLを探して通知）
+  # 4) 後処理（URLが見つかるまで粘り強くループ）
   - name: gcr.io/cloud-builders/gcloud
     id: finalize
     entrypoint: bash
@@ -63,40 +63,22 @@ steps:
       - |
         FIN_TOKEN=$$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")
         curl -sS -X POST -H "Authorization: Bearer $$FIN_TOKEN" "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/statuses/${COMMIT_SHA}" -d "{\"state\":\"success\",\"context\":\"${_STATUS_CONTEXT}\",\"description\":\"Cloud Build completed\"}"
-
         if [ ! -f /workspace/SKIP_BUILD ]; then
           source /workspace/app.env
-          
-          # 【改良】URLが見つかるまで最大18回（3分間）ループして探し続ける
           FINAL_URL=""
-          echo "Searching for the preview URL for PR #${_PR_NUMBER}..."
-          
           for i in {1..18}; do
-            echo "Attempt $$i: Looking for Cloud Run service..."
-            # PR番号とアプリ名を含むサービスを検索
-            FOUND_URL=$$(gcloud run services list --platform managed --region "${_REGION}" \
-              --filter="metadata.name ~ ${_PR_NUMBER} AND metadata.name ~ $$APP" \
-              --format='value(status.url)' | head -n 1)
-            
-            if [ -n "$$FOUND_URL" ]; then
-              FINAL_URL="$$FOUND_URL"
-              echo "URL found: $$FINAL_URL"
-              break
-            fi
+            # PR番号とアプリ名の両方を含むサービスを検索
+            FOUND_URL=$$(gcloud run services list --platform managed --region "${_REGION}" --filter="metadata.name ~ ${_PR_NUMBER} AND metadata.name ~ $$APP" --format='value(status.url)' | head -n 1)
+            if [ -n "$$FOUND_URL" ]; then FINAL_URL="$$FOUND_URL"; break; fi
             sleep 10
           done
-
-          if [ -z "$$FINAL_URL" ]; then
-            FINAL_URL="デプロイに時間がかかっています。Cloud Runコンソールで確認してください。"
-          fi
-
+          if [ -z "$$FINAL_URL" ]; then FINAL_URL="デプロイに時間がかかっています。Cloud Runコンソールで確認してください。"; fi
           MSG="🚀 **プレビュー環境のデプロイが完了しました！**\n\n**URL:** $$FINAL_URL"
           PAYLOAD=$$(python3 -c "import json; print(json.dumps({'body': \"$${MSG}\"}))")
           curl -sS -X POST -H "Authorization: Bearer $$FIN_TOKEN" "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/issues/${_PR_NUMBER}/comments" -d "$$PAYLOAD"
-          
-          # Auto-merge予約（最後に実行）
+          # オートマージ有効化
           QUERY='query($$o:String!,$$r:String!,$$n:Int!){repository(owner:$$o,name:$$r){pullRequest(number:$$n){id}}}'
-          PR_ID=$$(curl -sS -H "Authorization: Bearer $$FIN_TOKEN" -d "{\"query\":\"$$QUERY\",\"variables\":{\"o\":\"${_REPO_OWNER}\",\"r\":\"${_REPO_NAME}\",\"n\":${_PR_NUMBER}}}" https://api.github.com/graphql | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['repository']['pullRequest']['id'])")
+          PR_ID=$$(curl -sS -H "Authorization: Bearer $$TOKEN_VAL" -d "{\"query\":\"$$QUERY\",\"variables\":{\"o\":\"${_REPO_OWNER}\",\"r\":\"${_REPO_NAME}\",\"n\":${_PR_NUMBER}}}" https://api.github.com/graphql | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['repository']['pullRequest']['id'])")
           MUTATION='mutation($$id:ID!,$$m:PullRequestMergeMethod!){enablePullRequestAutoMerge(input:{pullRequestId:$$id,mergeMethod:$$m}){pullRequest{number}}}'
-          curl -sS -H "Authorization: Bearer $$FIN_TOKEN" -d "{\"query\":\"$$MUTATION\",\"variables\":{\"id\":\"$$PR_ID\",\"m\":\"${_MERGE_METHOD}\"}}" https://api.github.com/graphql
+          curl -sS -H "Authorization: Bearer $$TOKEN_VAL" -d "{\"query\":\"$$MUTATION\",\"variables\":{\"id\":\"$$PR_ID\",\"m\":\"${_MERGE_METHOD}\"}}" https://api.github.com/graphql
         fi
