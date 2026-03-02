@@ -9,33 +9,36 @@ substitutions:
   _REPO_OWNER: citizen-dev-lab
   _REPO_NAME: citizen-apps
   _MERGE_METHOD: SQUASH
+  _STATUS_CONTEXT: cloudbuild/pr-preview-deploy
 
 steps:
+  # 1) PRの変更ファイル一覧をGitHub APIから取得して、apps/<app>/ を1つだけ検出
   - name: gcr.io/cloud-builders/gcloud
     id: detect-app
     entrypoint: bash
     args:
       - -ceu
       - |
-        TOKEN="$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")"
+        TOKEN="$$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")"
 
-        files_json="$(curl -sS \
+        files_json="$$(curl -sS \
           -H "Authorization: Bearer $$TOKEN" \
           -H "Accept: application/vnd.github+json" \
           "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/pulls/${_PR_NUMBER}/files?per_page=100")"
 
-        names="$(echo "$$files_json" | python3 -c 'import sys,json,re; data=json.load(sys.stdin); apps=set(); [apps.add(re.match(r"apps/([^/]+)/", f.get("filename","")).group(1)) for f in data if re.match(r"apps/([^/]+)/", f.get("filename",""))]; print("\n".join(sorted(apps)))')"
+        names="$$(echo "$$files_json" | python3 -c 'import sys,json,re; data=json.load(sys.stdin); apps={m.group(1) for f in data if (m:=re.match(r"apps/([^/]+)/", f.get("filename","")))}; print("\n".join(sorted(apps)))')"
 
-        count="$(echo "$$names" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
+        count="$$(echo "$$names" | sed "/^[[:space:]]*$$/d" | wc -l | tr -d " ")"
         if [ "$$count" -ne 1 ]; then
           echo "ERROR: 1 PR = 1 app only. Found: $$names"
           exit 1
         fi
 
-        APP="$(echo "$$names" | head -n 1)"
+        APP="$$(echo "$$names" | head -n 1)"
         echo "APP=$$APP" > /workspace/app.env
         echo "Detected APP=$$APP"
 
+  # 2) Docker build & push
   - name: gcr.io/cloud-builders/docker
     id: build
     entrypoint: bash
@@ -43,11 +46,12 @@ steps:
       - -ceu
       - |
         source /workspace/app.env
-        IMG="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/$$APP:$SHORT_SHA"
+        IMG="${_REGION}-docker.pkg.dev/$$PROJECT_ID/${_AR_REPO}/$$APP:$$SHORT_SHA"
         docker build -t "$$IMG" "apps/$$APP"
         docker push "$$IMG"
         echo "IMG=$$IMG" >> /workspace/app.env
 
+  # 3) Workflows preview 実行
   - name: gcr.io/cloud-builders/gcloud
     id: workflow-preview
     entrypoint: bash
@@ -66,48 +70,52 @@ steps:
             \"repoOwner\":\"${_REPO_OWNER}\",
             \"repoName\":\"${_REPO_NAME}\",
             \"region\":\"${_REGION}\",
-            \"projectId\":\"$PROJECT_ID\"
+            \"projectId\":\"$$PROJECT_ID\"
           }"
 
-  - name: gcr.io/cloud-builders/gcloud
-    id: set-github-status-success
+  # 4) GitHubへ「Commit status」を報告（これがBranch rulesの Add checks に出る材料）
+  - name: gcr.io/cloud-builders/curl
+    id: report-status-success
     entrypoint: bash
     args:
       - -ceu
       - |
-        TOKEN="$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")"
+        TOKEN="$$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")"
 
-        # Cloud Build の組み込み変数（PRのHEADコミットSHAになる想定）
-        SHA="$COMMIT_SHA"
-
-        # Branch rule 側で選べる「status check 名（context）」を作る
-        CONTEXT="pr-preview-deploy (citizen-dev-lab)"
-
-        # ついでに Cloud Build のURLも付ける（なくてもOK）
-        TARGET_URL="https://console.cloud.google.com/cloud-build/builds/$BUILD_ID?project=$PROJECT_ID"
+        # Cloud Build 環境で取れるSHAを優先順に拾う（環境により名前が違うため）
+        SHA="$${COMMIT_SHA:-$${REVISION_ID:-}}"
+        if [ -z "$$SHA" ]; then
+          echo "ERROR: could not determine commit SHA (COMMIT_SHA/REVISION_ID empty)"
+          exit 1
+        fi
 
         curl -sS -X POST \
-          -H "Authorization: Bearer $TOKEN" \
+          -H "Authorization: Bearer $$TOKEN" \
           -H "Accept: application/vnd.github+json" \
-          -H "Content-Type: application/json" \
-          "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/statuses/$SHA" \
-          -d "{
-            \"state\":\"success\",
-            \"context\":\"$CONTEXT\",
-            \"description\":\"Cloud Build succeeded\",
-            \"target_url\":\"$TARGET_URL\"
-          }"
+          "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/statuses/$$SHA" \
+          -d "$$(cat <<EOF
+{
+  \"state\": \"success\",
+  \"context\": \"${_STATUS_CONTEXT}\",
+  \"description\": \"Cloud Build succeeded\",
+  \"target_url\": \"https://console.cloud.google.com/cloud-build/builds?project=$$PROJECT_ID\"
+}
+EOF
+)" >/dev/null
 
-  - name: gcr.io/cloud-builders/gcloud
+        echo "Reported GitHub status: ${_STATUS_CONTEXT} = success for $$SHA"
+
+  # 5) （任意）PRのAuto-mergeをAPIでONにする
+  - name: gcr.io/cloud-builders/curl
     id: enable-automerge
     entrypoint: bash
     args:
       - -ceu
       - |
-        TOKEN="$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")"
+        TOKEN="$$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")"
 
         QUERY='query($$owner:String!, $$name:String!, $$number:Int!){repository(owner:$$owner,name:$$name){pullRequest(number:$$number){id}}}'
-        PR_ID="$(curl -sS -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" \
+        PR_ID="$$(curl -sS -H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" \
           -d "{\"query\":\"$$QUERY\",\"variables\":{\"owner\":\"${_REPO_OWNER}\",\"name\":\"${_REPO_NAME}\",\"number\":${_PR_NUMBER}}}" \
           https://api.github.com/graphql | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['repository']['pullRequest']['id'])")"
 
