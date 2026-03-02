@@ -4,7 +4,7 @@ app = Flask(__name__)
 
 @app.get("/")
 def index():
-    return "hello from claude 🚀🚀🚀🚀"
+    return "hello from claude 🚀🚀🚀🚀🚀"
 
 if __name__ == "__main__":
     # Cloud RunはPORT環境変数で指定してくる
