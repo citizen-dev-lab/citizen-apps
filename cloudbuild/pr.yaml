@@ -1,9 +1,8 @@
 options:
   logging: CLOUD_LOGGING_ONLY
-
 substitutions:
   _REGION: asia-northeast1
-  _AR_REPO: citizen-dev-lab
+  _AR_REPO: citizen-dev-lab  # ← もし Artifact Registry の名前が違う場合はここを直してください
   _WORKFLOW: citizen-deploy
   _GITHUB_TOKEN_SECRET: github-token
   _REPO_OWNER: citizen-dev-lab
@@ -11,9 +10,7 @@ substitutions:
   _MERGE_METHOD: SQUASH
   _STATUS_CONTEXT: cloudbuild/pr-preview-deploy
   _PR_NUMBER: ""
-
 steps:
-  # 1) アプリ検出（Skip機能付き）
   - name: gcr.io/cloud-builders/gcloud
     id: detect-app
     entrypoint: bash
@@ -27,8 +24,6 @@ steps:
         COUNT=$$(grep -v "^[[:space:]]*$$" /workspace/apps.txt | wc -l | tr -d " ")
         if [ "$$COUNT" -eq 0 ]; then touch /workspace/SKIP_BUILD; exit 0; fi
         echo "APP=$$(cat /workspace/apps.txt | head -n 1)" > /workspace/app.env
-
-  # 2) Build & Push
   - name: gcr.io/cloud-builders/docker
     id: build
     entrypoint: bash
@@ -37,12 +32,12 @@ steps:
       - |
         if [ -f /workspace/SKIP_BUILD ]; then exit 0; fi
         source /workspace/app.env
-        IMG_NAME="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/$$APP:${SHORT_SHA}"
-        docker build -t "$$IMG_NAME" "apps/$$APP"
-        docker push "$$IMG_NAME"
-        echo "IMG=$$IMG_NAME" >> /workspace/app.env
-
-  # 3) デプロイ
+        BASE_IMG="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/$$APP"
+        # コミット番号版と latest版 の両方をタグ付けして Push する
+        docker build -t "$${BASE_IMG}:${SHORT_SHA}" -t "$${BASE_IMG}:latest" "apps/$$APP"
+        docker push "$${BASE_IMG}:${SHORT_SHA}"
+        docker push "$${BASE_IMG}:latest"
+        echo "IMG=$${BASE_IMG}:${SHORT_SHA}" >> /workspace/app.env
   - name: gcr.io/cloud-builders/gcloud
     id: workflow-preview
     entrypoint: bash
@@ -53,8 +48,6 @@ steps:
         source /workspace/app.env
         gcloud workflows run "${_WORKFLOW}" --location="${_REGION}" \
           --data="{\"mode\":\"preview\",\"appName\":\"$$APP\",\"image\":\"$$IMG\",\"prNumber\":${_PR_NUMBER},\"githubTokenSecret\":\"${_GITHUB_TOKEN_SECRET}\",\"repoOwner\":\"${_REPO_OWNER}\",\"repoName\":\"${_REPO_NAME}\",\"region\":\"${_REGION}\",\"projectId\":\"${PROJECT_ID}\"}"
-
-  # 4) 後処理（URLが見つかるまで粘り強くループ）
   - name: gcr.io/cloud-builders/gcloud
     id: finalize
     entrypoint: bash
@@ -66,19 +59,17 @@ steps:
         if [ ! -f /workspace/SKIP_BUILD ]; then
           source /workspace/app.env
           FINAL_URL=""
-          for i in {1..18}; do
-            # PR番号とアプリ名の両方を含むサービスを検索
-            FOUND_URL=$$(gcloud run services list --platform managed --region "${_REGION}" --filter="metadata.name ~ ${_PR_NUMBER} AND metadata.name ~ $$APP" --format='value(status.url)' | head -n 1)
+          for i in {1..20}; do
+            FOUND_URL=$$(gcloud run services list --platform managed --region "${_REGION}" --filter="metadata.name ~ ${_PR_NUMBER} OR metadata.name ~ $$APP" --format='value(status.url)' | head -n 1)
             if [ -n "$$FOUND_URL" ]; then FINAL_URL="$$FOUND_URL"; break; fi
             sleep 10
           done
-          if [ -z "$$FINAL_URL" ]; then FINAL_URL="デプロイに時間がかかっています。Cloud Runコンソールで確認してください。"; fi
+          if [ -z "$$FINAL_URL" ]; then FINAL_URL="デプロイ中またはエラー。Cloud Runコンソールを確認してください。"; fi
           MSG="🚀 **プレビュー環境のデプロイが完了しました！**\n\n**URL:** $$FINAL_URL"
           PAYLOAD=$$(python3 -c "import json; print(json.dumps({'body': \"$${MSG}\"}))")
           curl -sS -X POST -H "Authorization: Bearer $$FIN_TOKEN" "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/issues/${_PR_NUMBER}/comments" -d "$$PAYLOAD"
-          # オートマージ有効化
           QUERY='query($$o:String!,$$r:String!,$$n:Int!){repository(owner:$$o,name:$$r){pullRequest(number:$$n){id}}}'
-          PR_ID=$$(curl -sS -H "Authorization: Bearer $$TOKEN_VAL" -d "{\"query\":\"$$QUERY\",\"variables\":{\"o\":\"${_REPO_OWNER}\",\"r\":\"${_REPO_NAME}\",\"n\":${_PR_NUMBER}}}" https://api.github.com/graphql | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['repository']['pullRequest']['id'])")
+          PR_ID=$$(curl -sS -H "Authorization: Bearer $$FIN_TOKEN" -d "{\"query\":\"$$QUERY\",\"variables\":{\"o\":\"${_REPO_OWNER}\",\"r\":\"${_REPO_NAME}\",\"n\":${_PR_NUMBER}}}" https://api.github.com/graphql | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['repository']['pullRequest']['id'])")
           MUTATION='mutation($$id:ID!,$$m:PullRequestMergeMethod!){enablePullRequestAutoMerge(input:{pullRequestId:$$id,mergeMethod:$$m}){pullRequest{number}}}'
-          curl -sS -H "Authorization: Bearer $$TOKEN_VAL" -d "{\"query\":\"$$MUTATION\",\"variables\":{\"id\":\"$$PR_ID\",\"m\":\"${_MERGE_METHOD}\"}}" https://api.github.com/graphql
+          curl -sS -H "Authorization: Bearer $$FIN_TOKEN" -d "{\"query\":\"$$MUTATION\",\"variables\":{\"id\":\"$$PR_ID\",\"m\":\"${_MERGE_METHOD}\"}}" https://api.github.com/graphql
         fi
