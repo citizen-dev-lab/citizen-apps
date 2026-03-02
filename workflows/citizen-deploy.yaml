@@ -1,0 +1,61 @@
+main:
+  params: [mode, appName, image, prNumber, githubTokenSecret, repoOwner, repoName, region, projectId]
+  steps:
+    - init:
+        assign:
+          - serviceName: ${mode == "preview" ? "pr-" + string(prNumber) + "-app-" + appName : "app-" + appName}
+
+    # Cloud Run deploy（v2 API）
+    - deploy:
+        call: http.request
+        args:
+          method: PATCH
+          url: ${"https://run.googleapis.com/v2/projects/" + projectId + "/locations/" + region + "/services/" + serviceName}
+          auth:
+            type: OAuth2
+          headers:
+            Content-Type: application/json
+          query:
+            updateMask: "template.containers"
+            allowMissing: "true"
+          body:
+            template:
+              containers:
+                - image: ${image}
+        result: deployResp
+
+    - getUrl:
+        assign:
+          - serviceUrl: ${deployResp.body.uri}
+
+    # GitHub token（Secret Managerから取得）
+    - accessSecret:
+        call: googleapis.secretmanager.v1.projects.secrets.versions.access
+        args:
+          name: ${"projects/" + projectId + "/secrets/" + githubTokenSecret + "/versions/latest"}
+        result: secretResp
+
+    - decodeToken:
+        assign:
+          - githubToken: ${text.decode(base64.decode(secretResp.payload.data))}
+
+    # PRコメント投稿（PRはIssueなので /issues/{number}/comments）
+    - postComment:
+        call: http.request
+        args:
+          method: POST
+          url: ${"https://api.github.com/repos/" + repoOwner + "/" + repoName + "/issues/" + string(prNumber) + "/comments"}
+          headers:
+            Authorization: ${"Bearer " + githubToken}
+            Accept: "application/vnd.github+json"
+            X-GitHub-Api-Version: "2022-11-28"
+            Content-Type: "application/json"
+          body:
+            body: ${"✅ " + mode + " deploy 完了\n\n- app: `" + appName + "`\n- service: `" + serviceName + "`\n- url: " + serviceUrl}
+        result: commentResp
+
+    - done:
+        return:
+          service: ${serviceName}
+          url: ${serviceUrl}
+          githubCommentStatus: ${commentResp.code}
