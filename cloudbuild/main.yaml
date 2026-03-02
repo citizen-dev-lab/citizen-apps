@@ -16,7 +16,7 @@ steps:
     args:
       - -ceu
       - |
-        # 1) APP_NAME（直近差分から）
+        # 1) app（直近差分から）
         changed="$(git diff --name-only HEAD~1..HEAD || true)"
         app_names="$(echo "$changed" | awk -F/ '$1=="apps"{print $2}' | sort -u)"
         count="$(echo "$app_names" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
@@ -36,8 +36,9 @@ steps:
           exit 1
         fi
 
-        echo "APP_NAME=$APP_NAME" | tee /workspace/app.env
-        echo "PR_NUMBER=$pr" | tee -a /workspace/app.env
+        # ★bash変数は Cloud Build に食われるので $$ で逃がす
+        echo "APP_NAME=$$APP_NAME" | tee /workspace/app.env
+        echo "PR_NUMBER=$$pr" | tee -a /workspace/app.env
 
   - name: gcr.io/cloud-builders/docker
     id: build
@@ -46,10 +47,13 @@ steps:
       - -ceu
       - |
         source /workspace/app.env
-        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${APP_NAME}:$SHORT_SHA"
-        docker build -t "$IMAGE" "apps/${APP_NAME}"
+        # $PROJECT_ID / $SHORT_SHA は Cloud Build 組み込みなのでそのまま
+        # $APP_NAME は bash なので $$APP_NAME
+        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/$$APP_NAME:$SHORT_SHA"
+        docker build -t "$IMAGE" "apps/$$APP_NAME"
         docker push "$IMAGE"
-        echo "IMAGE=$IMAGE" | tee -a /workspace/app.env
+        # ★$IMAGE も bash なので $$IMAGE
+        echo "IMAGE=$$IMAGE" | tee -a /workspace/app.env
 
   - name: gcr.io/cloud-builders/gcloud
     id: workflow-prod
@@ -62,9 +66,9 @@ steps:
           --location="${_REGION}" \
           --data="{
             \"mode\":\"prod\",
-            \"appName\":\"${APP_NAME}\",
-            \"image\":\"${IMAGE}\",
-            \"prNumber\":${PR_NUMBER},
+            \"appName\":\"$$APP_NAME\",
+            \"image\":\"$$IMAGE\",
+            \"prNumber\":$$PR_NUMBER,
             \"githubTokenSecret\":\"${_GITHUB_TOKEN_SECRET}\",
             \"repoOwner\":\"${_REPO_OWNER}\",
             \"repoName\":\"${_REPO_NAME}\",
