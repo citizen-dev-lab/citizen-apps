@@ -5,40 +5,41 @@ options:
 substitutions:
   _REGION: asia-northeast1
   _AR_REPO: citizen-dev-lab
-  _WORKFLOW: citizen-deploy
-  _GITHUB_TOKEN_SECRET: github-token
-  _REPO_OWNER: citizen-dev-lab
-  _REPO_NAME: citizen-apps
 
 steps:
-  - name: gcr.io/cloud-builders/git
-    id: detect-app-and-pr
+  - name: gcr.io/cloud-builders/gcloud
+    id: detect-app
     entrypoint: bash
     args:
       - -ceu
       - |
-        changed="$(git diff --name-only HEAD~1..HEAD || true)"
+        # 変更ファイル一覧を「履歴が浅くても」取れるようにする
+        prev="$(git rev-parse HEAD^ 2>/dev/null || true)"
+        if [ -z "$prev" ]; then
+          changed="$(git show --name-only --pretty='' HEAD || true)"
+        else
+          changed="$(git diff --name-only "$prev"..HEAD || true)"
+        fi
+
         app_names="$(echo "$changed" | awk -F/ '$1=="apps"{print $2}' | sort -u)"
         count="$(echo "$app_names" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
+
+        # ★ここが今回の肝：アプリ変更が無いPRは「スキップして成功」
+        if [ "$count" -eq 0 ]; then
+          echo "No app changes detected. Skip pr-preview-deploy."
+          echo "skip=true" | tee /workspace/app.env
+          exit 0
+        fi
+
+        # アプリ変更が複数はエラー（今まで通り）
         if [ "$count" -ne 1 ]; then
-          echo "ERROR: main deploy expects exactly 1 app change. Found: $app_names"
+          echo "ERROR: 1 PR = 1 app only. Found: $app_names"
           exit 1
         fi
+
         app_name="$(echo "$app_names" | head -n 1)"
-
-        msg="$(git log -1 --pretty=%B)"
-        pr_number="$(echo "$msg" | sed -n 's/.*#\([0-9][0-9]*\).*/\1/p' | head -n 1 || true)"
-        if [ -z "$pr_number" ]; then
-          echo "ERROR: Could not detect PR number from merge commit message."
-          echo "Commit message was:"
-          echo "$msg"
-          exit 1
-        fi
-
-        {
-          echo "app_name=$app_name"
-          echo "pr_number=$pr_number"
-        } | tee /workspace/app.env
+        echo "app_name=$app_name" | tee /workspace/app.env
+        echo "Detected APP=$app_name"
 
   - name: gcr.io/cloud-builders/docker
     id: build
@@ -47,28 +48,22 @@ steps:
       - -ceu
       - |
         source /workspace/app.env
+
+        if [ "${skip:-}" = "true" ]; then
+          echo "Skip build (no app changes)."
+          exit 0
+        fi
+
         image="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${app_name}:$SHORT_SHA"
         docker build -t "$image" "apps/${app_name}"
         docker push "$image"
         echo "image=$image" | tee -a /workspace/app.env
 
-  - name: gcr.io/cloud-builders/gcloud
-    id: workflow-prod
-    entrypoint: bash
-    args:
-      - -ceu
-      - |
-        source /workspace/app.env
-        gcloud workflows run "${_WORKFLOW}" \
-          --location="${_REGION}" \
-          --data="{
-            \"mode\":\"prod\",
-            \"appName\":\"${app_name}\",
-            \"image\":\"${image}\",
-            \"prNumber\":${pr_number},
-            \"githubTokenSecret\":\"${_GITHUB_TOKEN_SECRET}\",
-            \"repoOwner\":\"${_REPO_OWNER}\",
-            \"repoName\":\"${_REPO_NAME}\",
-            \"region\":\"${_REGION}\",
-            \"projectId\":\"$PROJECT_ID\"
-          }"
+  # ここに「preview deploy」や「workflow実行」ステップがあるなら
+  # 同じように先頭で skip 判定を入れてください（下と同じ）
+  #
+  #   source /workspace/app.env
+  #   if [ "${skip:-}" = "true" ]; then
+  #     echo "Skip preview deploy (no app changes)."
+  #     exit 0
+  #   fi
