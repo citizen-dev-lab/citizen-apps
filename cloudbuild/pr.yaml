@@ -1,0 +1,88 @@
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  _REGION: asia-northeast1
+  _AR_REPO: citizen-dev-lab
+  _WORKFLOW: citizen-deploy
+  _GITHUB_TOKEN_SECRET: github-token
+  _REPO_OWNER: citizen-dev-lab
+  _REPO_NAME: citizen-apps
+  _MERGE_METHOD: SQUASH  # MERGE / REBASE も可
+
+steps:
+  # 1) APP_NAME を差分から特定（1アプリだけ）
+  - name: gcr.io/cloud-builders/git
+    id: detect-app
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        changed="$(git diff --name-only HEAD~1..HEAD || true)"
+        app_names="$(echo "$changed" | awk -F/ '$1=="apps"{print $2}' | sort -u)"
+        count="$(echo "$app_names" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
+        if [ "$count" -ne 1 ]; then
+          echo "ERROR: 1 PR = 1 app only. Found: $app_names"
+          exit 1
+        fi
+        APP_NAME="$(echo "$app_names" | head -n 1)"
+        echo "APP_NAME=$APP_NAME" | tee /workspace/app.env
+
+  # 2) Docker build/push（apps/<APP_NAME> をビルド対象に）
+  - name: gcr.io/cloud-builders/docker
+    id: build
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        source /workspace/app.env
+        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${APP_NAME}:$SHORT_SHA"
+        docker build -t "$IMAGE" "apps/${APP_NAME}"
+        docker push "$IMAGE"
+        echo "IMAGE=$IMAGE" | tee -a /workspace/app.env
+
+  # 3) Workflows 起動（preview）
+  - name: gcr.io/cloud-builders/gcloud
+    id: workflow-preview
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        source /workspace/app.env
+        gcloud workflows run "${_WORKFLOW}" \
+          --location="${_REGION}" \
+          --data="{
+            \"mode\":\"preview\",
+            \"appName\":\"${APP_NAME}\",
+            \"image\":\"${IMAGE}\",
+            \"prNumber\":${_PR_NUMBER},
+            \"githubTokenSecret\":\"${_GITHUB_TOKEN_SECRET}\",
+            \"repoOwner\":\"${_REPO_OWNER}\",
+            \"repoName\":\"${_REPO_NAME}\",
+            \"region\":\"${_REGION}\",
+            \"projectId\":\"$PROJECT_ID\"
+          }"
+
+  # 4) Auto-merge を ON（GraphQL）
+  #    ※PR作成者が自動マージONにできるよう repo設定でAuto-merge有効化が必要
+  - name: gcr.io/cloud-builders/curl
+    id: enable-automerge
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        # GitHub token（Secret Manager）を取得
+        TOKEN="$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")"
+
+        # PR node id を取得 → enablePullRequestAutoMerge
+        QUERY='query($owner:String!, $name:String!, $number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){id}}}'
+        PR_ID="$(curl -sS -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
+          -d "{\"query\":\"${QUERY}\",\"variables\":{\"owner\":\"${_REPO_OWNER}\",\"name\":\"${_REPO_NAME}\",\"number\":${_PR_NUMBER}}}" \
+          https://api.github.com/graphql | python -c "import sys,json; print(json.load(sys.stdin)['data']['repository']['pullRequest']['id'])")"
+
+        MUT='mutation($id:ID!, $method:PullRequestMergeMethod!){enablePullRequestAutoMerge(input:{pullRequestId:$id, mergeMethod:$method}){pullRequest{number}}}'
+        curl -sS -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
+          -d "{\"query\":\"${MUT}\",\"variables\":{\"id\":\"${PR_ID}\",\"method\":\"${_MERGE_METHOD}\"}}" \
+          https://api.github.com/graphql >/dev/null
+
+        echo "Auto-merge enabled for PR #${_PR_NUMBER}"
