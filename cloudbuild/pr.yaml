@@ -10,7 +10,6 @@ substitutions:
   _MERGE_METHOD: SQUASH
   _STATUS_CONTEXT: cloudbuild/pr-preview-deploy
   _PR_NUMBER: ""
-
 steps:
   # 1) アプリ検出
   - name: gcr.io/cloud-builders/gcloud
@@ -26,8 +25,7 @@ steps:
         COUNT=$$(grep -v "^[[:space:]]*$$" /workspace/apps.txt | wc -l | tr -d " ")
         if [ "$$COUNT" -eq 0 ]; then touch /workspace/SKIP_BUILD; exit 0; fi
         echo "APP=$$(cat /workspace/apps.txt | head -n 1)" > /workspace/app.env
-
-  # 2) Build & Push（★latestタグも一緒にPushするように修正）
+  # 2) Build & Push (latestタグ対応)
   - name: gcr.io/cloud-builders/docker
     id: build
     entrypoint: bash
@@ -37,12 +35,10 @@ steps:
         if [ -f /workspace/SKIP_BUILD ]; then exit 0; fi
         source /workspace/app.env
         BASE_IMG="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/$$APP"
-        # 固有タグ(SHORT_SHA)とlatestの両方を付けてビルド
         docker build -t "$${BASE_IMG}:${SHORT_SHA}" -t "$${BASE_IMG}:latest" "apps/$$APP"
         docker push "$${BASE_IMG}:${SHORT_SHA}"
         docker push "$${BASE_IMG}:latest"
         echo "IMG=$${BASE_IMG}:${SHORT_SHA}" >> /workspace/app.env
-
   # 3) デプロイ
   - name: gcr.io/cloud-builders/gcloud
     id: workflow-preview
@@ -54,8 +50,7 @@ steps:
         source /workspace/app.env
         gcloud workflows run "${_WORKFLOW}" --location="${_REGION}" \
           --data="{\"mode\":\"preview\",\"appName\":\"$$APP\",\"image\":\"$$IMG\",\"prNumber\":${_PR_NUMBER},\"githubTokenSecret\":\"${_GITHUB_TOKEN_SECRET}\",\"repoOwner\":\"${_REPO_OWNER}\",\"repoName\":\"${_REPO_NAME}\",\"region\":\"${_REGION}\",\"projectId\":\"${PROJECT_ID}\"}"
-
-  # 4) URL通知（待ち時間を1分半に短縮し、より確実に探す）
+  # 4) 後処理（より確実な URL 取得）
   - name: gcr.io/cloud-builders/gcloud
     id: finalize
     entrypoint: bash
@@ -67,18 +62,21 @@ steps:
         if [ ! -f /workspace/SKIP_BUILD ]; then
           source /workspace/app.env
           FINAL_URL=""
-          # 最大10回(100秒)ループ
-          for i in {1..10}; do
-            FOUND_URL=$$(gcloud run services list --platform managed --region "${_REGION}" --filter="metadata.name ~ ${_PR_NUMBER} OR metadata.name ~ $$APP" --format='value(status.url)' | head -n 1)
+          echo "Looking for Cloud Run URL..."
+          for i in {1..12}; do
+            # 【強化版】もっともシンプルで確実な方法で URL を取得
+            FOUND_URL=$$(gcloud run services describe "$$APP" --platform managed --region "${_REGION}" --format='value(status.url)' 2>/dev/null || \
+                         gcloud run services describe "app-$$APP" --platform managed --region "${_REGION}" --format='value(status.url)' 2>/dev/null || \
+                         gcloud run services list --platform managed --region "${_REGION}" --filter="metadata.name ~ ${_PR_NUMBER}" --format='value(status.url)' | head -n 1)
+            
             if [ -n "$$FOUND_URL" ]; then FINAL_URL="$$FOUND_URL"; break; fi
-            sleep 10
+            sleep 15
           done
-          if [ -z "$$FINAL_URL" ]; then FINAL_URL="デプロイ中またはエラー。Cloud Runコンソールを確認してください。"; fi
+          if [ -z "$$FINAL_URL" ]; then FINAL_URL="デプロイ完了。反映に時間がかかっています。しばらくしてから [Cloud Run コンソール] をご確認ください。"; fi
           MSG="🚀 **プレビュー環境のデプロイが完了しました！**\n\n**URL:** $$FINAL_URL"
           PAYLOAD=$$(python3 -c "import json; print(json.dumps({'body': \"$${MSG}\"}))")
           curl -sS -X POST -H "Authorization: Bearer $$FIN_TOKEN" "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/issues/${_PR_NUMBER}/comments" -d "$$PAYLOAD"
-          
-          # オートマージ有効化
+          # オートマージ予約
           QUERY='query($$o:String!,$$r:String!,$$n:Int!){repository(owner:$$o,name:$$r){pullRequest(number:$$n){id}}}'
           PR_ID=$$(curl -sS -H "Authorization: Bearer $$FIN_TOKEN" -d "{\"query\":\"$$QUERY\",\"variables\":{\"o\":\"${_REPO_OWNER}\",\"r\":\"${_REPO_NAME}\",\"n\":${_PR_NUMBER}}}" https://api.github.com/graphql | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['repository']['pullRequest']['id'])")
           MUTATION='mutation($$id:ID!,$$m:PullRequestMergeMethod!){enablePullRequestAutoMerge(input:{pullRequestId:$$id,mergeMethod:$$m}){pullRequest{number}}}'
