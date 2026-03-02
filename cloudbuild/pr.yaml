@@ -8,10 +8,9 @@ substitutions:
   _GITHUB_TOKEN_SECRET: github-token
   _REPO_OWNER: citizen-dev-lab
   _REPO_NAME: citizen-apps
-  _MERGE_METHOD: SQUASH  # MERGE / REBASE も可
+  _MERGE_METHOD: SQUASH
 
 steps:
-  # 1) APP_NAME を差分から特定（1アプリだけ）
   - name: gcr.io/cloud-builders/git
     id: detect-app
     entrypoint: bash
@@ -19,16 +18,15 @@ steps:
       - -ceu
       - |
         changed="$(git diff --name-only HEAD~1..HEAD || true)"
-        app_names="$(echo "$changed" | awk -F/ '$1=="apps"{print $2}' | sort -u)"
-        count="$(echo "$app_names" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
+        names="$(echo "$changed" | awk -F/ '$1=="apps"{print $2}' | sort -u)"
+        count="$(echo "$names" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
         if [ "$count" -ne 1 ]; then
-          echo "ERROR: 1 PR = 1 app only. Found: $app_names"
+          echo "ERROR: 1 PR = 1 app only. Found: $names"
           exit 1
         fi
-        APP_NAME="$(echo "$app_names" | head -n 1)"
-        echo "APP_NAME=$APP_NAME" | tee /workspace/app.env
+        APP="$(echo "$names" | head -n 1)"
+        echo "APP=$$APP" > /workspace/app.env
 
-  # 2) Docker build/push（apps/<APP_NAME> をビルド対象に）
   - name: gcr.io/cloud-builders/docker
     id: build
     entrypoint: bash
@@ -43,7 +41,6 @@ steps:
         docker push "$IMAGE"
         echo "IMAGE=$IMAGE" | tee -a /workspace/app.env
 
-  # 3) Workflows 起動（preview）
   - name: gcr.io/cloud-builders/gcloud
     id: workflow-preview
     entrypoint: bash
@@ -72,7 +69,6 @@ steps:
     args:
       - -ceu
       - |
-        # GitHub token（Secret Manager）を取得
         TOKEN="$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")"
 
         # PR node id を取得 → enablePullRequestAutoMerge
