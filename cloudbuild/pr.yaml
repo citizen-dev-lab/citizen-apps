@@ -19,24 +19,33 @@ steps:
     args:
       - -ceu
       - |
-        TOKEN="$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")"
+        # PRの差分から apps/<app>/... を抽出
+        changed="$(git diff --name-only HEAD~1..HEAD 2>/dev/null || true)"
 
-        files_json="$(curl -sS \
-          -H "Authorization: Bearer $$TOKEN" \
-          -H "Accept: application/vnd.github+json" \
-          "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/pulls/${_PR_NUMBER}/files?per_page=100")"
+        app_names="$(printf '%s\n' "$changed" \
+          | awk -F/ '$1=="apps" && NF>=2 {print $2}' \
+          | sort -u)"
 
-        names="$(echo "$$files_json" | python3 -c 'import sys,json,re; data=json.load(sys.stdin); apps=set(); [apps.add(m.group(1)) for f in data if (m:=re.match(r"apps/([^/]+)/", f.get("filename","")) )]; print("\n".join(sorted(apps)))')"
+        # 空行を除去して正確にカウント（空なら0）
+        count="$(printf '%s\n' "$app_names" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
 
-        count="$(echo "$$names" | sed "/^[[:space:]]*$$/d" | wc -l | tr -d " ")"
-        if [ "$$count" -ne 1 ]; then
-          echo "ERROR: 1 PR = 1 app only. Found: $$names"
+        # apps/ の変更が無いPRは、preview deployをスキップして成功扱い
+        if [ "$count" -eq 0 ]; then
+          echo "No app changes detected. Skip pr-preview-deploy."
+          echo "skip=true" | tee /workspace/app.env
+          exit 0
+        fi
+
+        # apps/ の変更が2つ以上はエラー（設計通り）
+        if [ "$count" -ne 1 ]; then
+          echo "ERROR: 1 PR = 1 app only. Found: $app_names"
           exit 1
         fi
 
-        APP="$(echo "$$names" | head -n 1)"
-        echo "APP=$$APP" > /workspace/app.env
-        echo "Detected APP=$$APP"
+        app_name="$(printf '%s\n' "$app_names" | head -n 1)"
+        echo "app_name=$app_name" | tee /workspace/app.env
+        echo "skip=false" | tee -a /workspace/app.env
+        echo "Detected APP=$app_name"
 
   # 2) Docker build & push（PROJECT_ID unbound 対策済み）
   - name: gcr.io/cloud-builders/docker
