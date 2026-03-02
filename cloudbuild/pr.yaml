@@ -26,8 +26,7 @@ steps:
         echo "$$RESPONSE" | python3 -c 'import sys,json,re;data=json.load(sys.stdin);apps={m.group(1) for f in data if (m:=re.match(r"apps/([^/]+)/",f.get("filename","")))};print("\n".join(sorted(apps)))' > /workspace/apps.txt
         COUNT=$$(grep -v "^[[:space:]]*$$" /workspace/apps.txt | wc -l | tr -d " ")
         if [ "$$COUNT" -eq 0 ]; then touch /workspace/SKIP_BUILD; exit 0; fi
-        DET_APP=$$(cat /workspace/apps.txt | head -n 1)
-        echo "APP=$$DET_APP" > /workspace/app.env
+        echo "APP=$$(cat /workspace/apps.txt | head -n 1)" > /workspace/app.env
 
   # 2) Build & Push
   - name: gcr.io/cloud-builders/docker
@@ -43,7 +42,7 @@ steps:
         docker push "$$IMG_NAME"
         echo "IMG=$$IMG_NAME" >> /workspace/app.env
 
-  # 3) デプロイ (Workflows実行)
+  # 3) デプロイ
   - name: gcr.io/cloud-builders/gcloud
     id: workflow-preview
     entrypoint: bash
@@ -55,7 +54,7 @@ steps:
         gcloud workflows run "${_WORKFLOW}" --location="${_REGION}" \
           --data="{\"mode\":\"preview\",\"appName\":\"$$APP\",\"image\":\"$$IMG\",\"prNumber\":${_PR_NUMBER},\"githubTokenSecret\":\"${_GITHUB_TOKEN_SECRET}\",\"repoOwner\":\"${_REPO_OWNER}\",\"repoName\":\"${_REPO_NAME}\",\"region\":\"${_REGION}\",\"projectId\":\"${PROJECT_ID}\"}"
 
-  # 4) 後処理 (URLの待機取得と通知)
+  # 4) 後処理（URL検索と通知）
   - name: gcr.io/cloud-builders/gcloud
     id: finalize
     entrypoint: bash
@@ -63,28 +62,28 @@ steps:
       - -ceu
       - |
         FIN_TOKEN=$$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")
-        
-        # まずはStatusを成功にする
         curl -sS -X POST -H "Authorization: Bearer $$FIN_TOKEN" "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/statuses/${COMMIT_SHA}" -d "{\"state\":\"success\",\"context\":\"${_STATUS_CONTEXT}\",\"description\":\"Cloud Build completed\"}"
 
         if [ ! -f /workspace/SKIP_BUILD ]; then
           source /workspace/app.env
+          echo "Finding the URL for PR ${_PR_NUMBER}..."
+          sleep 25
           
-          # 【改良】Workflowsがデプロイを開始するまで少し待つ (15秒)
-          echo "Waiting for deployment to initialize..."
-          sleep 15
-          
-          # 【改良】サービス名の候補（hello または app-hello）の両方を試す
-          # ユーザー設定に基づき app-hello が本命と推測
-          RUN_URL=$$(gcloud run services describe "app-$$APP" --platform managed --region "${_REGION}" --format='value(status.url)' 2>/dev/null || \
-                     gcloud run services describe "$$APP" --platform managed --region "${_REGION}" --format='value(status.url)' 2>/dev/null || \
-                     echo "デプロイ完了。数分後にURLが有効になります。")
+          # 【賢い検索】名前の中に PR番号 と アプリ名 の両方が入っているサービスを探す
+          RUN_URL=$$(gcloud run services list --platform managed --region "${_REGION}" \
+            --filter="metadata.name ~ ${_PR_NUMBER} AND metadata.name ~ $$APP" \
+            --format='value(status.url)' | head -n 1)
+
+          # もし見つからなければ、通常の名前で試す
+          if [ -z "$$RUN_URL" ]; then
+            RUN_URL=$$(gcloud run services describe "$$APP" --platform managed --region "${_REGION}" --format='value(status.url)' 2>/dev/null || echo "デプロイ完了。数分後にURLが有効になります。")
+          fi
 
           MSG="🚀 **プレビュー環境のデプロイが完了しました！**\n\n**URL:** $$RUN_URL"
           PAYLOAD=$$(python3 -c "import json; print(json.dumps({'body': \"$${MSG}\"}))")
           curl -sS -X POST -H "Authorization: Bearer $$FIN_TOKEN" "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/issues/${_PR_NUMBER}/comments" -d "$$PAYLOAD"
           
-          # Auto-merge
+          # Auto-merge予約（最後に行う）
           QUERY='query($$o:String!,$$r:String!,$$n:Int!){repository(owner:$$o,name:$$r){pullRequest(number:$$n){id}}}'
           PR_ID=$$(curl -sS -H "Authorization: Bearer $$FIN_TOKEN" -d "{\"query\":\"$$QUERY\",\"variables\":{\"o\":\"${_REPO_OWNER}\",\"r\":\"${_REPO_NAME}\",\"n\":${_PR_NUMBER}}}" https://api.github.com/graphql | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['repository']['pullRequest']['id'])")
           MUTATION='mutation($$id:ID!,$$m:PullRequestMergeMethod!){enablePullRequestAutoMerge(input:{pullRequestId:$$id,mergeMethod:$$m}){pullRequest{number}}}'
