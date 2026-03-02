@@ -29,7 +29,7 @@ steps:
         DET_APP=$$(cat /workspace/apps.txt | head -n 1)
         echo "APP=$$DET_APP" > /workspace/app.env
 
-  # 2) Build & Push（gcloudコマンドを削除し、${PROJECT_ID}に置き換え）
+  # 2) Build & Push
   - name: gcr.io/cloud-builders/docker
     id: build
     entrypoint: bash
@@ -38,13 +38,12 @@ steps:
       - |
         if [ -f /workspace/SKIP_BUILD ]; then exit 0; fi
         source /workspace/app.env
-        # ${PROJECT_ID} と ${SHORT_SHA} は Cloud Build が自動で書き換えてくれます
         IMG_NAME="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/$$APP:${SHORT_SHA}"
         docker build -t "$$IMG_NAME" "apps/$$APP"
         docker push "$$IMG_NAME"
         echo "IMG=$$IMG_NAME" >> /workspace/app.env
 
-  # 3) デプロイ
+  # 3) デプロイ (Workflows実行)
   - name: gcr.io/cloud-builders/gcloud
     id: workflow-preview
     entrypoint: bash
@@ -56,7 +55,7 @@ steps:
         gcloud workflows run "${_WORKFLOW}" --location="${_REGION}" \
           --data="{\"mode\":\"preview\",\"appName\":\"$$APP\",\"image\":\"$$IMG\",\"prNumber\":${_PR_NUMBER},\"githubTokenSecret\":\"${_GITHUB_TOKEN_SECRET}\",\"repoOwner\":\"${_REPO_OWNER}\",\"repoName\":\"${_REPO_NAME}\",\"region\":\"${_REGION}\",\"projectId\":\"${PROJECT_ID}\"}"
 
-  # 4) 後処理
+  # 4) 後処理 (URLの待機取得と通知)
   - name: gcr.io/cloud-builders/gcloud
     id: finalize
     entrypoint: bash
@@ -64,13 +63,28 @@ steps:
       - -ceu
       - |
         FIN_TOKEN=$$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")
+        
+        # まずはStatusを成功にする
         curl -sS -X POST -H "Authorization: Bearer $$FIN_TOKEN" "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/statuses/${COMMIT_SHA}" -d "{\"state\":\"success\",\"context\":\"${_STATUS_CONTEXT}\",\"description\":\"Cloud Build completed\"}"
+
         if [ ! -f /workspace/SKIP_BUILD ]; then
           source /workspace/app.env
-          RUN_URL=$$(gcloud run services describe "$$APP" --platform managed --region "${_REGION}" --format='value(status.url)' 2>/dev/null || echo "URL取得中...")
+          
+          # 【改良】Workflowsがデプロイを開始するまで少し待つ (15秒)
+          echo "Waiting for deployment to initialize..."
+          sleep 15
+          
+          # 【改良】サービス名の候補（hello または app-hello）の両方を試す
+          # ユーザー設定に基づき app-hello が本命と推測
+          RUN_URL=$$(gcloud run services describe "app-$$APP" --platform managed --region "${_REGION}" --format='value(status.url)' 2>/dev/null || \
+                     gcloud run services describe "$$APP" --platform managed --region "${_REGION}" --format='value(status.url)' 2>/dev/null || \
+                     echo "デプロイ完了。数分後にURLが有効になります。")
+
           MSG="🚀 **プレビュー環境のデプロイが完了しました！**\n\n**URL:** $$RUN_URL"
           PAYLOAD=$$(python3 -c "import json; print(json.dumps({'body': \"$${MSG}\"}))")
           curl -sS -X POST -H "Authorization: Bearer $$FIN_TOKEN" "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/issues/${_PR_NUMBER}/comments" -d "$$PAYLOAD"
+          
+          # Auto-merge
           QUERY='query($$o:String!,$$r:String!,$$n:Int!){repository(owner:$$o,name:$$r){pullRequest(number:$$n){id}}}'
           PR_ID=$$(curl -sS -H "Authorization: Bearer $$FIN_TOKEN" -d "{\"query\":\"$$QUERY\",\"variables\":{\"o\":\"${_REPO_OWNER}\",\"r\":\"${_REPO_NAME}\",\"n\":${_PR_NUMBER}}}" https://api.github.com/graphql | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['repository']['pullRequest']['id'])")
           MUTATION='mutation($$id:ID!,$$m:PullRequestMergeMethod!){enablePullRequestAutoMerge(input:{pullRequestId:$$id,mergeMethod:$$m}){pullRequest{number}}}'
