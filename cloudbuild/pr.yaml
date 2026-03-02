@@ -10,54 +10,26 @@ substitutions:
   _REPO_NAME: citizen-apps
   _MERGE_METHOD: SQUASH
   _STATUS_CONTEXT: cloudbuild/pr-preview-deploy
-  # 重要：GCPコンソールのトリガー設定で $(pull_request.number) を割り当ててください
   _PR_NUMBER: ""
 
 steps:
-  # 1) PRの変更ファイルから対象アプリ（apps/<app>/）を検出
+  # 1) アプリ検出
   - name: gcr.io/cloud-builders/gcloud
     id: detect-app
     entrypoint: bash
     args:
       - -ceu
       - |
-        if [ -z "${_PR_NUMBER}" ]; then
-          echo "ERROR: _PR_NUMBER is empty."
-          exit 1
-        fi
-
+        if [ -z "${_PR_NUMBER}" ]; then exit 1; fi
         TOKEN_VAL=$$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")
-
-        RESPONSE=$$(curl -sS -H "Authorization: Bearer $$TOKEN_VAL" \
-          -H "Accept: application/vnd.github+json" \
-          "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/pulls/${_PR_NUMBER}/files?per_page=100")
-
-        echo "$$RESPONSE" | python3 -c '
-        import sys, json, re
-        data = json.load(sys.stdin)
-        if not isinstance(data, list):
-            sys.exit(1)
-        apps = {m.group(1) for f in data if (m := re.match(r"apps/([^/]+)/", f.get("filename", "")))}
-        print("\n".join(sorted(apps)))
-        ' > /workspace/apps.txt || (echo "GitHub API Access Error" && exit 1)
-
+        RESPONSE=$$(curl -sS -H "Authorization: Bearer $$TOKEN_VAL" "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/pulls/${_PR_NUMBER}/files?per_page=100")
+        echo "$$RESPONSE" | python3 -c 'import sys,json,re;data=json.load(sys.stdin);apps={m.group(1) for f in data if (m:=re.match(r"apps/([^/]+)/",f.get("filename","")))};print("\n".join(sorted(apps)))' > /workspace/apps.txt
         COUNT=$$(grep -v "^[[:space:]]*$$" /workspace/apps.txt | wc -l | tr -d " ")
-
-        # 【ここが重要】アプリの修正がない場合はエラーにせず、スキップ用の印を付ける
-        if [ "$$COUNT" -eq 0 ]; then
-          echo "No app changes detected. Skipping build and deploy."
-          touch /workspace/SKIP_BUILD
-          exit 0
-        elif [ "$$COUNT" -gt 1 ]; then
-          echo "ERROR: Multiple apps detected. 1 PR = 1 App only."
-          exit 1
-        fi
-
+        if [ "$$COUNT" -eq 0 ]; then touch /workspace/SKIP_BUILD; exit 0; fi
         DET_APP=$$(cat /workspace/apps.txt | head -n 1)
         echo "APP=$$DET_APP" > /workspace/app.env
-        echo "Detected APP=$$DET_APP"
 
-  # 2) Docker build & push (SKIP時は何もしない)
+  # 2) Build & Push（gcloudコマンドを削除し、${PROJECT_ID}に置き換え）
   - name: gcr.io/cloud-builders/docker
     id: build
     entrypoint: bash
@@ -66,14 +38,13 @@ steps:
       - |
         if [ -f /workspace/SKIP_BUILD ]; then exit 0; fi
         source /workspace/app.env
-        CUR_PROJECT=$$(gcloud config get-value project)
-        CUR_SHA=$$(git rev-parse --short HEAD)
-        IMG_NAME="${_REGION}-docker.pkg.dev/$$CUR_PROJECT/${_AR_REPO}/$$APP:$$CUR_SHA"
+        # ${PROJECT_ID} と ${SHORT_SHA} は Cloud Build が自動で書き換えてくれます
+        IMG_NAME="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/$$APP:${SHORT_SHA}"
         docker build -t "$$IMG_NAME" "apps/$$APP"
         docker push "$$IMG_NAME"
         echo "IMG=$$IMG_NAME" >> /workspace/app.env
 
-  # 3) Workflows 実行 (SKIP時は何もしない)
+  # 3) デプロイ
   - name: gcr.io/cloud-builders/gcloud
     id: workflow-preview
     entrypoint: bash
@@ -82,22 +53,10 @@ steps:
       - |
         if [ -f /workspace/SKIP_BUILD ]; then exit 0; fi
         source /workspace/app.env
-        CUR_PROJECT=$$(gcloud config get-value project)
-        gcloud workflows run "${_WORKFLOW}" \
-          --location="${_REGION}" \
-          --data="{
-            \"mode\":\"preview\",
-            \"appName\":\"$$APP\",
-            \"image\":\"$$IMG\",
-            \"prNumber\":${_PR_NUMBER},
-            \"githubTokenSecret\":\"${_GITHUB_TOKEN_SECRET}\",
-            \"repoOwner\":\"${_REPO_OWNER}\",
-            \"repoName\":\"${_REPO_NAME}\",
-            \"region\":\"${_REGION}\",
-            \"projectId\":\"$$CUR_PROJECT\"
-          }"
+        gcloud workflows run "${_WORKFLOW}" --location="${_REGION}" \
+          --data="{\"mode\":\"preview\",\"appName\":\"$$APP\",\"image\":\"$$IMG\",\"prNumber\":${_PR_NUMBER},\"githubTokenSecret\":\"${_GITHUB_TOKEN_SECRET}\",\"repoOwner\":\"${_REPO_OWNER}\",\"repoName\":\"${_REPO_NAME}\",\"region\":\"${_REGION}\",\"projectId\":\"${PROJECT_ID}\"}"
 
-  # 4) 後処理（Status更新 / URLコメント / Auto-merge予約）
+  # 4) 後処理
   - name: gcr.io/cloud-builders/gcloud
     id: finalize
     entrypoint: bash
@@ -105,31 +64,15 @@ steps:
       - -ceu
       - |
         FIN_TOKEN=$$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")
-        FIN_SHA=$$(git rev-parse HEAD)
-        
-        # 修正ファイルに関わらず、ビルド自体が終わったことをGitHubに伝える（緑のチェックを付ける）
-        curl -sS -X POST -H "Authorization: Bearer $$FIN_TOKEN" \
-          -H "Accept: application/vnd.github+json" \
-          "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/statuses/$$FIN_SHA" \
-          -d "{\"state\":\"success\",\"context\":\"${_STATUS_CONTEXT}\",\"description\":\"Cloud Build completed\"}"
-
+        curl -sS -X POST -H "Authorization: Bearer $$FIN_TOKEN" "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/statuses/${COMMIT_SHA}" -d "{\"state\":\"success\",\"context\":\"${_STATUS_CONTEXT}\",\"description\":\"Cloud Build completed\"}"
         if [ ! -f /workspace/SKIP_BUILD ]; then
           source /workspace/app.env
           RUN_URL=$$(gcloud run services describe "$$APP" --platform managed --region "${_REGION}" --format='value(status.url)' 2>/dev/null || echo "URL取得中...")
           MSG="🚀 **プレビュー環境のデプロイが完了しました！**\n\n**URL:** $$RUN_URL"
           PAYLOAD=$$(python3 -c "import json; print(json.dumps({'body': \"$${MSG}\"}))")
-          curl -sS -X POST -H "Authorization: Bearer $$FIN_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/issues/${_PR_NUMBER}/comments" \
-            -d "$$PAYLOAD"
-
-          # Auto-merge 予約
+          curl -sS -X POST -H "Authorization: Bearer $$FIN_TOKEN" "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/issues/${_PR_NUMBER}/comments" -d "$$PAYLOAD"
           QUERY='query($$o:String!,$$r:String!,$$n:Int!){repository(owner:$$o,name:$$r){pullRequest(number:$$n){id}}}'
-          PR_ID=$$(curl -sS -H "Authorization: Bearer $$FIN_TOKEN" \
-            -d "{\"query\":\"$$QUERY\",\"variables\":{\"o\":\"${_REPO_OWNER}\",\"r\":\"${_REPO_NAME}\",\"n\":${_PR_NUMBER}}}" \
-            https://api.github.com/graphql | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['repository']['pullRequest']['id'])")
+          PR_ID=$$(curl -sS -H "Authorization: Bearer $$FIN_TOKEN" -d "{\"query\":\"$$QUERY\",\"variables\":{\"o\":\"${_REPO_OWNER}\",\"r\":\"${_REPO_NAME}\",\"n\":${_PR_NUMBER}}}" https://api.github.com/graphql | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['repository']['pullRequest']['id'])")
           MUTATION='mutation($$id:ID!,$$m:PullRequestMergeMethod!){enablePullRequestAutoMerge(input:{pullRequestId:$$id,mergeMethod:$$m}){pullRequest{number}}}'
-          curl -sS -H "Authorization: Bearer $$FIN_TOKEN" \
-            -d "{\"query\":\"$$MUTATION\",\"variables\":{\"id\":\"$$PR_ID\",\"m\":\"${_MERGE_METHOD}\"}}" \
-            https://api.github.com/graphql
+          curl -sS -H "Authorization: Bearer $$FIN_TOKEN" -d "{\"query\":\"$$MUTATION\",\"variables\":{\"id\":\"$$PR_ID\",\"m\":\"${_MERGE_METHOD}\"}}" https://api.github.com/graphql
         fi
