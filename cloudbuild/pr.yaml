@@ -73,7 +73,6 @@ steps:
             \"projectId\":\"$$PROJECT_ID\"
           }"
 
-  # 4) GitHubへ「Commit status」を報告（これがBranch rulesの Add checks に出る材料）
   - name: gcr.io/cloud-builders/curl
     id: report-status-success
     entrypoint: bash
@@ -82,26 +81,26 @@ steps:
       - |
         TOKEN="$$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")"
 
-        # Cloud Build 環境で取れるSHAを優先順に拾う（環境により名前が違うため）
         SHA="$${COMMIT_SHA:-$${REVISION_ID:-}}"
         if [ -z "$$SHA" ]; then
           echo "ERROR: could not determine commit SHA (COMMIT_SHA/REVISION_ID empty)"
           exit 1
         fi
 
+        payload="$$(python3 -c 'import json,os; print(json.dumps({
+          "state":"success",
+          "context":os.environ.get("_STATUS_CONTEXT","cloudbuild/pr-preview-deploy"),
+          "description":"Cloud Build succeeded",
+          "target_url":f"https://console.cloud.google.com/cloud-build/builds?project={os.environ.get(\"PROJECT_ID\",\"\")}"
+        }))')"
+
         curl -sS -X POST \
           -H "Authorization: Bearer $$TOKEN" \
           -H "Accept: application/vnd.github+json" \
           "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/statuses/$$SHA" \
-          -d "$$(cat <<EOF
-{
-  \"state\": \"success\",
-  \"context\": \"${_STATUS_CONTEXT}\",
-  \"description\": \"Cloud Build succeeded\",
-  \"target_url\": \"https://console.cloud.google.com/cloud-build/builds?project=$$PROJECT_ID\"
-}
-EOF
-)" >/dev/null
+          -d "$$payload" >/dev/null
+
+        echo "Reported GitHub status: ${_STATUS_CONTEXT} = success for $$SHA"
 
         echo "Reported GitHub status: ${_STATUS_CONTEXT} = success for $$SHA"
 
