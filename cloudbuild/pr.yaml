@@ -11,28 +11,36 @@ substitutions:
   _MERGE_METHOD: SQUASH
 
 steps:
-  - name: gcr.io/cloud-builders/git
+  - name: gcr.io/cloud-builders/curl
     id: detect-app
     entrypoint: bash
     args:
       - -ceu
       - |
-        # PRでは shallow checkout で HEAD~1 が無いことがあるため、
-        # main を fetch して main...HEAD の差分で判定する
-        git fetch --depth=50 origin main
+        TOKEN="$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")"
 
-        changed="$(git diff --name-only origin/main...HEAD || true)"
-        names="$(echo "$changed" | awk -F/ '$1=="apps"{print $2}' | sort -u)"
-        count="$(echo "$names" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
+        # PRの変更ファイル一覧をGitHub APIから取得
+        files_json="$(curl -sS -H "Authorization: Bearer $$TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/pulls/${_PR_NUMBER}/files?per_page=100")"
 
-        if [ "$count" -ne 1 ]; then
-          echo "ERROR: 1 PR = 1 app only. Found: $names"
-          echo "Changed files:"
-          echo "$changed"
+        names="$(echo "$$files_json" | python3 -c "import sys,json; \
+          data=json.load(sys.stdin); \
+          apps=set(); \
+          import re; \
+          for f in data: \
+            m=re.match(r'apps/([^/]+)/', f.get('filename','')); \
+            if m: apps.add(m.group(1)); \
+          print('\\n'.join(sorted(apps)))")"
+
+        count="$(echo "$$names" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
+        if [ "$$count" -ne 1 ]; then
+          echo "ERROR: 1 PR = 1 app only. Found: $$names"
+          echo "$$files_json" | python3 -c "import sys,json; data=json.load(sys.stdin); print('Changed files:'); [print(' -', f.get('filename')) for f in data]"
           exit 1
         fi
 
-        APP="$(echo "$names" | head -n 1)"
+        APP="$(echo "$$names" | head -n 1)"
         echo "APP=$$APP" > /workspace/app.env
         echo "Detected APP=$$APP"
 
