@@ -50,7 +50,7 @@ steps:
 
         EXEC_NAME="$(gcloud workflows run "${_WORKFLOW}" \
           --location="${_REGION}" \
-          --data="{\"region\":\"${_REGION}\",\"serviceName\":\"${_SERVICE}\",\"image\":\"${IMAGE}\"}" \
+          --data="{\"region\":\"${_REGION}\",\"serviceName\":\"${_SERVICE}\",\"image\":\"$IMAGE\"}" \
           --format="value(name)")"
 
         if [ -z "${EXEC_NAME}" ]; then
@@ -81,7 +81,7 @@ steps:
 
         URL="$(echo "${RESULT}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("url",""))')"
 
-        BODY="{\"body\": \"✅ Deploy completed\\n\\n- service: ${_SERVICE}\\n- region: ${_REGION}\\n- url: ${URL}\\n- image: ${IMAGE}\"}"
+        BODY="{\"body\": \"✅ Deploy completed\\n\\n- service: ${_SERVICE}\\n- region: ${_REGION}\\n- url: ${URL}\\n- image: $IMAGE\"}"
 
         curl -sS -X POST \
           -H "Authorization: Bearer ${GITHUB_TOKEN}" \
