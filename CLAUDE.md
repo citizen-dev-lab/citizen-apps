@@ -58,25 +58,36 @@
 実装が完了したら、Claudeは**ユーザーへの確認なしに**以下を自動実行する：
 
 ### Step 1: コミット & Push
-```
+```bash
 git add apps/<appName>/
 git commit -m "feat: <appName>アプリを追加（または変更内容の要約）"
 git push -u origin <branch-name>
 ```
 
-### Step 2: PR自動作成
-`gh` CLIが認証済みかを確認し、PRを自動作成する：
+### Step 2: PR自動作成（curl で GitHub API を直接叩く）
+環境変数 `GITHUB_TOKEN` を使い、curl で PR を作成する。
+`gh` コマンドは使わない（環境によって利用できないため）。
+
+```bash
+curl -s -X POST \
+  -H "Authorization: token ${GITHUB_TOKEN}" \
+  -H "Accept: application/vnd.github+json" \
+  -d '{
+    "title": "<appName>: 変更内容の要約",
+    "head": "<branch-name>",
+    "base": "main",
+    "body": "## 変更内容\n- ..."
+  }' \
+  "https://api.github.com/repos/citizen-dev-lab/citizen-apps/pulls"
 ```
-gh auth status
-```
-- **認証済みの場合**: `gh pr create` でPRを自動作成する
+
+- **成功時**: レスポンスの `html_url` を PR リンクとしてユーザーに提示する
+- **GITHUB_TOKEN 未設定の場合**: PR作成用URLを出力してフォールバックする
   ```
-  gh pr create --title "<appName>: 変更内容の要約" --body "## 変更内容\n- ...\n"
+  https://github.com/citizen-dev-lab/citizen-apps/pull/new/<branch>
   ```
-- **未認証の場合**: PR作成用URLを出力してユーザーに案内する
-  ```
-  https://github.com/<owner>/<repo>/pull/new/<branch>
-  ```
+
+> **注意**: トークンは環境変数としてのみ保持する。CLAUDE.md やソースコードにトークンを直接書き込んではならない。
 
 ### Step 3: ユーザーへの案内
 - PRのURLを提示する
@@ -97,5 +108,5 @@ gh auth status
 1. 変更内容の要約
 2. 変更ファイル一覧
 3. 作業ブランチ名
-4. **PRのURL**（`gh pr create` で作成した場合はPRリンク、未認証の場合はPR作成用URL）
+4. **PRのURL**（curl で自動作成したPRリンク、または GITHUB_TOKEN 未設定時はPR作成用URL）
 5. 「内容に問題がなければマージしてください。マージ後、自動でデプロイが始まります。URLはPRのコメント欄に届きます」というメッセージ
