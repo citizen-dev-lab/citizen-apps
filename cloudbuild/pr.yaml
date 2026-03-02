@@ -19,24 +19,37 @@ steps:
     args:
       - -ceu
       - |
-        TOKEN="$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")"
+        # 変更ファイル一覧を安定して取るために main を手元に持ってくる
+        git fetch origin main --depth=50 || true
 
-        files_json="$(curl -sS \
-          -H "Authorization: Bearer $$TOKEN" \
-          -H "Accept: application/vnd.github+json" \
-          "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/pulls/${_PR_NUMBER}/files?per_page=100")"
+        # main と HEAD の共通祖先を基準に差分を取る（取れなければ HEAD 単体）
+        base="$(git merge-base HEAD origin/main 2>/dev/null || true)"
+        if [ -n "$base" ]; then
+          changed="$(git diff --name-only "$base"...HEAD || true)"
+        else
+          changed="$(git show --name-only --pretty='' HEAD || true)"
+        fi
 
-        names="$(echo "$$files_json" | python3 -c 'import sys,json,re; data=json.load(sys.stdin); apps=set(); [apps.add(m.group(1)) for f in data if (m:=re.match(r"apps/([^/]+)/", f.get("filename","")) )]; print("\n".join(sorted(apps)))')"
+        app_names="$(echo "$changed" | awk -F/ '$1=="apps"{print $2}' | sort -u)"
+        count="$(echo "$app_names" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
 
-        count="$(echo "$$names" | sed "/^[[:space:]]*$$/d" | wc -l | tr -d " ")"
-        if [ "$$count" -ne 1 ]; then
-          echo "ERROR: 1 PR = 1 app only. Found: $$names"
+        # ★重要：アプリ変更なしは “スキップ” 扱いにする
+        if [ "$count" -eq 0 ]; then
+          echo "No app changes detected. Skip pr-preview-deploy."
+          echo "skip=true" | tee /workspace/app.env
+          exit 0
+        fi
+
+        # アプリ変更が複数はエラー
+        if [ "$count" -ne 1 ]; then
+          echo "ERROR: 1 PR = 1 app only. Found: $app_names"
           exit 1
         fi
 
-        APP="$(echo "$$names" | head -n 1)"
-        echo "APP=$$APP" > /workspace/app.env
-        echo "Detected APP=$$APP"
+        APP="$(echo "$app_names" | head -n 1)"
+        echo "APP=$APP" | tee /workspace/app.env
+        echo "skip=false" | tee -a /workspace/app.env
+        echo "Detected APP=$APP"
 
   # 2) Docker build & push（PROJECT_ID unbound 対策済み）
   - name: gcr.io/cloud-builders/docker
