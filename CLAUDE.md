@@ -1,112 +1,77 @@
 # citizen-apps – CLAUDE.md
 
-このリポジトリは、市民開発者がチャットを通じてアプリを作成し、最小限のGitHub操作でCloud Runへ公開するためのものです。Claude Code はこのルールに従って動作してください。
+このリポジトリは、市民開発者が自然言語で依頼するだけで、インフラやトークン、GitHubの操作を一切意識することなく、Cloud Runへアプリを公開するための「自動運転」環境です。Claude Code は以下のルールを厳守してください。
 
 ---
 
-# 🎯 Goal
-- 市民開発者が自然言語で依頼し、Claudeが設計・実装を行う
-- GitHubでPRを作成し、市民がMergeボタンを押すだけで公開される
-- インフラ操作（GCP）はすべて自動化されているため、Claudeはコードに集中する
+## 🎯 究極のゴール
+- **ゼロ・クリック・デプロイ**: 依頼から公開まで、市民の手作業（マージボタンのクリック含む）を完全に排除する。
+- **自律型エージェント**: AIが自ら鍵（トークン）を取得し、PRを作成し、デプロイ完了まで責任を持って見届ける。
 
 ---
 
-# 🗂 Repository structure
-- アプリ配置: `apps/<appName>/` 配下に独立して作成
-- 既存アプリへの干渉禁止（共通ライブラリがない限り、他ディレクトリは触らない）
-
----
-
-# 🧠 Communication（説明 → 合意 → 実装）
+## 🧠 コミュニケーション・プロトコル
 依頼を受けたら、必ず以下のステップを踏むこと：
-1. **要件定義**: 依頼を1〜3行で要約する
-2. **実装方針の提示**: 使用技術、新規作成・修正するファイル一覧を説明する
-3. **リリースの案内**: 
-    - 「ブランチ作成 → Push → PR作成」の流れを説明
-    - 「マージ後、数分でPRのコメント欄にプレビューURLが届く」ことを伝える
-4. **承認確認**: 「この方針で開発を開始してよいですか？」と確認し、合意後に着手する
+1. **要件定義**: 依頼を1〜3行で要約する。
+2. **「全自動」の宣言**: 
+   - 「これから実装し、PR作成からオートマージまで私がすべて代行します」
+   - 「あなたは何も操作せず、このチャットでURLが届くのを待つだけでOKです」と伝える。
+3. **承認確認**: 方針への合意を得てから実装を開始する。
 
 ---
 
-# 🧩 Default tech choices
-- **Language**: Python 3.11
-- **Framework**: Flask (推奨)
-- **App server**: gunicorn
-- **Container**: Docker（`python:3.11-slim` をベースに使用。Port 8080で待受けること）
-- **Deployment**: 自動化済み（Cloud Build → Workflows → Cloud Run）
+## 🚀 完了プロトコル（実装完了時の自動実行）
 
----
+実装が終わったら、Claudeはユーザーへの確認なしに以下の全工程を完遂する。
 
-# 🌿 Git strategy
-- **Branch**: 必ず新規ブランチを作成する。命名: `claude/<appName>-<short-uuid>`
-- **Commit**: 原則1コミットにまとめ、意味のあるメッセージを付ける
-- **Push**: 作業ブランチへPushする。`main` への直接Pushは厳禁
-
----
-
-# 🔁 PR policy
-1. **PRリンクの提示**: Push後、PR作成URL（`https://github.com/<owner>/<repo>/pull/new/<branch>`）を出力する
-2. **手順案内**: 市民に対し「PRを作成して、内容に問題がなければマージしてください」と案内する
-3. **デプロイの待ち合わせ**:
-   - 「マージ後、Cloud Buildが自動でプレビュー環境を作成します」
-   - 「**URLはPRのコメント欄に自動で投稿される**ので、そちらを確認してください」と案内する
-
----
-
-# 🚀 完了プロトコル（実装完了時の自動実行）
-
-実装が完了したら、Claudeは**ユーザーへの確認なしに**以下を自動実行する：
-
-### Step 1: コミット & Push
+### Step 0: トークンの自給自足取得
+環境変数 GITHUB_TOKEN がない場合、GCP Secret Managerから最新バージョンを自動取得する。
 ```bash
-git add apps/<appName>/
-git commit -m "feat: <appName>アプリを追加（または変更内容の要約）"
-git push -u origin <branch-name>
-```
+export GITHUB_TOKEN=$(gcloud secrets versions access latest --secret="github-token")
+Step 1: コミット & Push
+新規ブランチ claude/<appName>-<uuid> を作成し、全作業内容をコミットしてリモートへPushする。
 
-### Step 2: PR自動作成（curl で GitHub API を直接叩く）
-環境変数 `GITHUB_TOKEN` を使い、curl で PR を作成する。
-`gh` コマンドは使わない（環境によって利用できないため）。
+Step 2: PR作成（オートマージ前提）
+取得した GITHUB_TOKEN を使い、curl で GitHub API を直接叩いて PR を作成する。
+※Cloud Build側でオートマージが設定されているため、作成と同時にデプロイ工程が開始される。
 
-```bash
+Bash
 curl -s -X POST \
   -H "Authorization: token ${GITHUB_TOKEN}" \
   -H "Accept: application/vnd.github+json" \
-  -d '{
-    "title": "<appName>: 変更内容の要約",
-    "head": "<branch-name>",
-    "base": "main",
-    "body": "## 変更内容\n- ..."
-  }' \
-  "https://api.github.com/repos/citizen-dev-lab/citizen-apps/pulls"
-```
+  -d "{
+    \"title\": \"Auto-deploy: <appName>\",
+    \"head\": \"<branch-name>\",
+    \"base\": \"main\",
+    \"body\": \"AIによる全自動生成PRです。オートマージにより数分で本番公開されます。\"
+  }" \
+  "[https://api.github.com/repos/citizen-dev-lab/citizen-apps/pulls](https://api.github.com/repos/citizen-dev-lab/citizen-apps/pulls)"
+Step 3: 執念深いURL報告（居残り監視）
+PR作成後、すぐに会話を終了してはならない。main へのマージと Cloud Run への反映が完了するまで、gcloud コマンドで監視を継続する。
 
-- **成功時**: レスポンスの `html_url` を PR リンクとしてユーザーに提示する
-- **GITHUB_TOKEN 未設定の場合**: PR作成用URLを出力してフォールバックする
-  ```
-  https://github.com/citizen-dev-lab/citizen-apps/pull/new/<branch>
-  ```
+Bash
+# 10秒おきに最大30回（約5分間）リトライしてURLを特定する
+gcloud run services describe app-<appName> --region asia-northeast1 --format='value(status.url)'
+公開URLが確認でき、かつアクセス可能（200 OK）になったことを確認してから最終報告を行う。
 
-> **注意**: トークンは環境変数としてのみ保持する。CLAUDE.md やソースコードにトークンを直接書き込んではならない。
+万が一失敗した場合は、Cloud Buildのログを確認し、市民に分かりやすく原因を説明する。
 
-### Step 3: ユーザーへの案内
-- PRのURLを提示する
-- 「内容に問題がなければマージしてください」と案内する
-- 「マージ後、自動でデプロイが始まります。URLはPRのコメント欄に届きます」と伝える
+🧩 技術スタック（デフォルト）
+Language: Python 3.11
 
----
+Framework: Flask
 
-# 📛 Safety & Naming Rules
-- **既存の破壊禁止**: `cloudbuild/*.yaml` や既存アプリを削除・変更しない
-- **サービス名**: `app-<appName>` または `<appName>` を使用する
-- **Workflows**: 既存の `citizen-deploy` がデプロイを担うため、独自に作成しない
+Server: gunicorn
 
----
+Container: python:3.11-slim (Port 8080で待受け)
 
-# 🧭 Output format
-実装完了時は以下の順で出力する：
-1. 変更内容の要約
-2. 変更ファイル一覧
-3. 作業ブランチ名
-4. **PRのURL**（curl で自動作成したPRリンク、または GITHUB_TOKEN 未設定時はPR作成用URL）
-5. 「内容に問題がなければマージしてください。マージ後、自動でデプロイが始まります。URLはPRのコメント欄に届きます」というメッセージ
+Deployment: citizen-deploy (GCP Workflows)
+
+🧭 出力フォーマット（最終報告時）
+変更内容の簡潔な要約
+
+作成された PR のリンク
+
+✨ Cloud Run 公開URL（AIが自律的に取得したもの）
+
+「お待たせしました！すべての工程が自動で完了し、アプリが公開されました。どうぞご確認ください！」というメッセージ
