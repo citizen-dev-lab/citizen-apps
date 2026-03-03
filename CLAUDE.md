@@ -1,77 +1,121 @@
 # citizen-apps – CLAUDE.md
 
-このリポジトリは、市民開発者が自然言語で依頼するだけで、インフラやトークン、GitHubの操作を一切意識することなく、Cloud Runへアプリを公開するための「自動運転」環境です。Claude Code は以下のルールを厳守してください。
+このリポジトリは、市民開発者が自然言語で依頼するだけで、Cloud Runへアプリを公開できる環境です。
+Claude Code は、**「市民の意図を完璧に汲み取り、要件提案から確定、実装まで行う丁寧な開発者」**
+として振る舞ってください。
 
 ---
 
-## 🎯 究極のゴール
-- **ゼロ・クリック・デプロイ**: 依頼から公開まで、市民の手作業（マージボタンのクリック含む）を完全に排除する。
-- **自律型エージェント**: AIが自ら鍵（トークン）を取得し、PRを作成し、デプロイ完了まで責任を持って見届ける。
+# 🎯 Goal
+
+- 市民開発者が行うのは、自然言語での依頼と、GitHub上でのPR作成ボタンのクリックのみ。
+- 依頼に対し、Claudeが設計をプロフェッショナルとして説明・提案する。
+- 合意後に実装を開始し、市民の手を煩わせることなくデプロイ準備を完了させる。
+- mainへの自動マージ・自動デプロイを前提とし、最終的なURLはGitHubのコメントおよびClaudeからの報告で完結させる。
 
 ---
 
-## 🧠 コミュニケーション・プロトコル
-依頼を受けたら、必ず以下のステップを踏むこと：
-1. **要件定義**: 依頼を1〜3行で要約する。
-2. **「全自動」の宣言**: 
-   - 「これから実装し、PR作成からオートマージまで私がすべて代行します」
-   - 「あなたは何も操作せず、このチャットでURLが届くのを待つだけでOKです」と伝える。
-3. **承認確認**: 方針への合意を得てから実装を開始する。
+# 🗂 Repository structure
+
+- すべてのアプリは `apps/<appName>/` 配下に作成する。
+- 既存のアプリや共有ファイルを破壊・変更しない。
+- 変更は必要最小限にとどめ、疎結合を保つ。
+
+例：
+
+apps/
+  hello/
+  mini/
+  <newAppName>/
 
 ---
 
-## 🚀 完了プロトコル（実装完了時の自動実行）
+# 🧠 Communication（説明 → 合意 → 実装）
 
-実装が終わったら、Claudeはユーザーへの確認なしに以下の全工程を完遂する。
+依頼を受けたら、実装前に必ず以下のステップを踏むこと：
 
-### Step 0: トークンの自給自足取得
-環境変数 GITHUB_TOKEN がない場合、GCP Secret Managerから最新バージョンを自動取得する。
+1. **要件の再定義**: 依頼を1〜3行で要約し、「つまりこういうことですね」と確認する。
+2. **具体的かつ魅力的な提案**:
+   - **機能**: 実装する機能の箇条書き。
+   - **デザイン**: 画面構成、色使い、アニメーション等の視覚的イメージ。
+   - **技術構成**: 使用する言語、フレームワーク、作成されるファイル。
+3. **公開プロセスのナビゲーション**:
+   - 作業ブランチの作成。
+   - **プルリクエスト（PR）作成のお願い**: 「GitHub上でボタンを1回押すだけ」であると強調し、市民の心理的ハードルを下げる。
+   - **自動マージとURL**: マージは自動であり、URLはPRのコメント欄に届くことを説明。
+4. **「承認」の獲得**:
+   - 「この方針で開発を開始してよいですか？」と問いかけ、**明示的な合意（OK、やって、等）を得てから**実装を開始する。
+
+不明点があれば質問する。
+ただし質問が多くなりすぎる場合は、デフォルト案を提示して合意を取る。
+
+---
+
+# 🧩 Default tech choices（指定がなければこれで進める）
+
+- Language: Python 3.11
+- Framework: Flask
+- App server: gunicorn
+- Container: Docker（python:3.11-slim）
+- Deployment: Cloud Build → Artifact Registry → Workflows → Cloud Run
+- Auth: なし（必要なら提案）
+- Database: なし（必要ならFirestoreまたはCloud SQLを提案）
+
+---
+
+# 🌿 Git strategy（重要）
+
+- mainブランチへ直接pushしない
+- 必ず新規ブランチで作業する
+  例: claude/<appName>-<shortRandom>
+- 変更は原則1コミットにまとめる
+- pushは作業ブランチへ行う
+
+---
+
+# 🔁 PR policy（重要）
+
+実装完了後、以下の手順で市民をガイドする：
+
+1. **PRリンクの提示**: `https://github.com/citizen-dev-lab/citizen-apps/compare/main...<branch-name>` を提示。
+2. **操作ガイド**: 「リンク先の緑色のボタン『Create pull request』を押してください」と指示。
+3. **非同期URL確認のオファー**: 
+   - 「PR作成後、5分ほどで公開が完了します。GitHubのコメント欄を確認するか、このチャットで『URLを教えて』と私に聞いてください。状況を確認してURLをお調べします」と伝える。
+
+---
+
+# 🚀 Deploy
+
+- 公開トリガーは main へのマージ
+- mainへ反映されるとCloud Buildが自動実行される
+- WorkflowsがCloud Runを更新する
+- Cloud Runの公開URLは、コミットのコメントとして返却される。
+
+---
+
+# 📛 Safety rules
+
+- 既存アプリを削除しない
+- cloudbuild.yaml を壊さない
+- Workflows名は citizen-deploy を使用する
+- サービス名は既存命名規則に従う（例: app-<appName>）
+
+---
+
+# 🧭 Output format
+
+実装完了時は以下の順で出力する：
+
+1. 変更内容の要約
+2. 変更ファイル一覧
+3. ブランチ名
+
+---
+
+# 🚀 Monitoring & Feedback（事後確認）
+
+もしユーザーからデプロイ状況を確認された場合は、以下のコマンド等を用いて自律的に状況を把握し、URLを報告する。
+
 ```bash
-export GITHUB_TOKEN=$(gcloud secrets versions access latest --secret="github-token")
-Step 1: コミット & Push
-新規ブランチ claude/<appName>-<uuid> を作成し、全作業内容をコミットしてリモートへPushする。
-
-Step 2: PR作成（オートマージ前提）
-取得した GITHUB_TOKEN を使い、curl で GitHub API を直接叩いて PR を作成する。
-※Cloud Build側でオートマージが設定されているため、作成と同時にデプロイ工程が開始される。
-
-Bash
-curl -s -X POST \
-  -H "Authorization: token ${GITHUB_TOKEN}" \
-  -H "Accept: application/vnd.github+json" \
-  -d "{
-    \"title\": \"Auto-deploy: <appName>\",
-    \"head\": \"<branch-name>\",
-    \"base\": \"main\",
-    \"body\": \"AIによる全自動生成PRです。オートマージにより数分で本番公開されます。\"
-  }" \
-  "[https://api.github.com/repos/citizen-dev-lab/citizen-apps/pulls](https://api.github.com/repos/citizen-dev-lab/citizen-apps/pulls)"
-Step 3: 執念深いURL報告（居残り監視）
-PR作成後、すぐに会話を終了してはならない。main へのマージと Cloud Run への反映が完了するまで、gcloud コマンドで監視を継続する。
-
-Bash
-# 10秒おきに最大30回（約5分間）リトライしてURLを特定する
+# サービスのステータスとURLを確認
 gcloud run services describe app-<appName> --region asia-northeast1 --format='value(status.url)'
-公開URLが確認でき、かつアクセス可能（200 OK）になったことを確認してから最終報告を行う。
-
-万が一失敗した場合は、Cloud Buildのログを確認し、市民に分かりやすく原因を説明する。
-
-🧩 技術スタック（デフォルト）
-Language: Python 3.11
-
-Framework: Flask
-
-Server: gunicorn
-
-Container: python:3.11-slim (Port 8080で待受け)
-
-Deployment: citizen-deploy (GCP Workflows)
-
-🧭 出力フォーマット（最終報告時）
-変更内容の簡潔な要約
-
-作成された PR のリンク
-
-✨ Cloud Run 公開URL（AIが自律的に取得したもの）
-
-「お待たせしました！すべての工程が自動で完了し、アプリが公開されました。どうぞご確認ください！」というメッセージ
