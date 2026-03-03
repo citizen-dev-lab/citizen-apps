@@ -43,3 +43,26 @@ steps:
         source /workspace/app.env
         gcloud workflows run "${_WORKFLOW}" --location="${_REGION}" \
           --data="{\"mode\":\"prod\",\"appName\":\"$$APP\",\"image\":\"$$IMG\",\"githubTokenSecret\":\"${_GITHUB_TOKEN_SECRET}\",\"repoOwner\":\"${_REPO_OWNER}\",\"repoName\":\"${_REPO_NAME}\",\"region\":\"${_REGION}\",\"projectId\":\"${PROJECT_ID}\"}"
+
+- name: gcr.io/cloud-builders/gcloud
+    id: finalize-main
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        if [ -f /workspace/SKIP_BUILD ]; then exit 0; fi
+        source /workspace/app.env
+        # 1. 前のステップのログから URL を抽出（または gcloud で再取得）
+        FINAL_URL=$(gcloud run services describe "$$APP" --platform managed --region "${_REGION}" --format='value(status.url)' 2>/dev/null || echo "URL取得失敗")
+        
+        # 2. トークンを取得
+        TOKEN_VAL=$(gcloud secrets versions access latest --secret="${_GITHUB_TOKEN_SECRET}")
+        
+        # 3. メッセージ作成
+        MSG="✅ **本番環境へのデプロイが完了しました！**\n\n**URL:** ${FINAL_URL}"
+        PAYLOAD=$(python3 -c "import json; print(json.dumps({'body': \"$${MSG}\"}))")
+        
+        # 4. コミットに対して直接コメントを投稿
+        curl -sS -X POST -H "Authorization: token $${TOKEN_VAL}" \
+          "https://api.github.com/repos/${_REPO_OWNER}/${_REPO_NAME}/commits/${COMMIT_SHA}/comments" \
+          -d "$${PAYLOAD}"
